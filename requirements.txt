@@ -9,6 +9,7 @@ SQLAlchemy==2.0.43
 asyncpg==0.30.0
 psycopg2-binary==2.9.10
 alembic==1.16.5
+greenlet==3.2.4
 
 # OpenAI
 openai==1.59.7
