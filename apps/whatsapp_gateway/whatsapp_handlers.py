@@ -832,7 +832,9 @@ async def handle_option_selection(
     set_state(chat_id, WhatsAppState.EVA_CONFIRMING_ORDER)
 
     # Проверяем флаг show_price_in_summary
-    show_price = config.i18n.get("company.show_price_in_summary", True)  # По умолчанию true для обратной совместимости
+    show_price = config.i18n.get("company.show_price_in_summary")
+    if show_price is None:
+        show_price = True  # По умолчанию true для обратной совместимости
     logger.info(f"💰 [ORDER_SUMMARY] show_price_in_summary={show_price}")
 
     # Формируем сводку с условным показом цены

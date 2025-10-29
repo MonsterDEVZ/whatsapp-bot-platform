@@ -52,19 +52,24 @@ def set_state(chat_id: str, state: str, data: Optional[Dict[str, Any]] = None):
         state: Новое состояние
         data: Дополнительные данные для сохранения
     """
+    old_state = user_states.get(chat_id, {}).get("state", "NO_STATE")
+
     if chat_id not in user_states:
         user_states[chat_id] = {
             "state": state,
             "data": data or {},
             "updated_at": datetime.now()
         }
+        logger.info(f"🔄 [STATE_MACHINE] {chat_id[:15]}... | NEW STATE: {state}")
     else:
         user_states[chat_id]["state"] = state
         user_states[chat_id]["updated_at"] = datetime.now()
+        logger.info(f"🔄 [STATE_MACHINE] {chat_id[:15]}... | {old_state} → {state}")
 
         # Обновляем данные (merge)
         if data:
             user_states[chat_id]["data"].update(data)
+            logger.debug(f"📝 [STATE_MACHINE] Обновлены данные: {list(data.keys())}")
 
 
 def get_state(chat_id: str) -> str:
@@ -78,6 +83,7 @@ def get_state(chat_id: str) -> str:
         Текущее состояние или IDLE если не найдено
     """
     if chat_id not in user_states:
+        logger.debug(f"🔍 [STATE_MACHINE] {chat_id[:15]}... | NO STATE FOUND → returning IDLE")
         return WhatsAppState.IDLE
 
     # Проверяем TTL
@@ -87,13 +93,15 @@ def get_state(chat_id: str) -> str:
     if elapsed_time > STATE_TTL:
         # Состояние устарело - очищаем
         logger.info(
-            f"⏱️  Сессия для пользователя {chat_id} сброшена по таймауту "
+            f"⏱️  [STATE_MACHINE] Сессия для {chat_id[:15]}... сброшена по таймауту "
             f"({int(elapsed_time.total_seconds())}s неактивности)"
         )
         clear_state(chat_id)
         return WhatsAppState.IDLE
 
-    return user_data["state"]
+    current_state = user_data["state"]
+    logger.debug(f"🔍 [STATE_MACHINE] {chat_id[:15]}... | Current state: {current_state}")
+    return current_state
 
 
 def get_user_data(chat_id: str) -> Dict[str, Any]:

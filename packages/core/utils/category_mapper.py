@@ -69,7 +69,7 @@ def get_category_name(category_code: str, i18n) -> str:
             target_category = i18n_key.split(".", 1)[1]
 
             # Получаем catalog_categories из i18n
-            catalog = i18n.get("buttons.catalog_categories", [])
+            catalog = i18n.get("buttons.catalog_categories") or []
 
             if isinstance(catalog, list):
                 # Ищем элемент с нужным callback_data
@@ -81,7 +81,7 @@ def get_category_name(category_code: str, i18n) -> str:
 
         # Для EVOPOLIKI используем buttons.categories
         else:
-            category_name = i18n.get(i18n_key, "")
+            category_name = i18n.get(i18n_key) or ""
             if category_name:
                 logger.info(f"✅ [CATEGORY_MAPPER] Найдено название: {category_name}")
                 return category_name
