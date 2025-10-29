@@ -1114,25 +1114,28 @@ async def handle_name_input(chat_id: str, name: str, config: Config, session) ->
     }
 
     # Добавляем данные о товаре и автомобиле (если есть)
-    if "selected_category" in user_data:
-        lead_data["category"] = user_data["selected_category"]
-        logger.info(f"📦 [HANDLE_NAME_INPUT] Категория: {user_data['selected_category']}")
+    if "category_name" in user_data:
+        lead_data["category"] = user_data["category_name"]
+        logger.info(f"📦 [HANDLE_NAME_INPUT] Категория: {user_data['category_name']}")
 
-    if "selected_brand" in user_data:
-        lead_data["car_brand"] = user_data["selected_brand"]
-        logger.info(f"🚗 [HANDLE_NAME_INPUT] Марка: {user_data['selected_brand']}")
+    if "brand_name" in user_data:
+        lead_data["car_brand"] = user_data["brand_name"]
+        logger.info(f"🚗 [HANDLE_NAME_INPUT] Марка: {user_data['brand_name']}")
 
-    if "selected_model" in user_data:
-        lead_data["car_model"] = user_data["selected_model"]
-        logger.info(f"🚗 [HANDLE_NAME_INPUT] Модель: {user_data['selected_model']}")
+    if "model_name" in user_data:
+        lead_data["car_model"] = user_data["model_name"]
+        logger.info(f"🚗 [HANDLE_NAME_INPUT] Модель: {user_data['model_name']}")
 
     # Добавляем опции (если есть)
-    if "selected_options" in user_data:
-        options_list = user_data["selected_options"]
-        if isinstance(options_list, list):
-            lead_data["options"] = ", ".join(options_list)
-        else:
-            lead_data["options"] = str(options_list)
+    if "selected_option" in user_data:
+        option_code = user_data["selected_option"]
+        # Преобразуем код опции в читаемый текст
+        option_names = {
+            "with_borders": "С бортами",
+            "without_borders": "Без бортов",
+            "need_consultation": "Требуется консультация"
+        }
+        lead_data["options"] = option_names.get(option_code, option_code)
         logger.info(f"⚙️ [HANDLE_NAME_INPUT] Опции: {lead_data['options']}")
 
     # Добавляем цену (если есть)
