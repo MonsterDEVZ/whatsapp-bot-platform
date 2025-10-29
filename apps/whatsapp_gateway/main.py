@@ -54,8 +54,8 @@ from packages.core.ai.response_parser import (
 from packages.core.utils.category_mapper import get_category_name
 
 # Импортируем наши обработчики
-from state_manager import get_state, get_user_data, WhatsAppState, set_state, update_user_data
-import whatsapp_handlers
+from .state_manager import get_state, get_user_data, WhatsAppState, set_state, update_user_data
+from . import whatsapp_handlers
 
 # Глобальный словарь AssistantManager для каждого tenant
 # Формат: {tenant_slug: AssistantManager}
