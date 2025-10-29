@@ -36,6 +36,7 @@ from packages.core.db.queries import (
     get_models_for_brand_from_db
 )
 from packages.core.memory import get_memory
+from packages.core.integrations import create_lead
 
 from .state_manager import (
     WhatsAppState,
@@ -1114,49 +1115,59 @@ async def handle_name_input(chat_id: str, name: str, config: Config, session) ->
     request_type = user_data.get("request_type", "order")
     logger.info(f"🔍 [HANDLE_NAME_INPUT] Тип заявки: {request_type}")
 
-    # Сохраняем заявку в Airtable
+    # Сохраняем заявку в Airtable через новый airtable_manager
     try:
         logger.info(f"📤 [HANDLE_NAME_INPUT] ===== ПОДГОТОВКА К ОТПРАВКЕ В AIRTABLE =====")
         logger.info(f"📤 [HANDLE_NAME_INPUT] Клиент: {name.strip()}")
         logger.info(f"📤 [HANDLE_NAME_INPUT] Телефон: {phone_number}")
-        logger.info(f"📤 [HANDLE_NAME_INPUT] Tenant: {config.tenant_slug}")
+        logger.info(f"📤 [HANDLE_NAME_INPUT] Tenant: {config.bot.tenant_slug}")
         logger.info(f"📤 [HANDLE_NAME_INPUT] Тип заявки: {request_type}")
 
-        # Логируем ключевые данные заказа
-        if "selected_brand" in user_data:
-            logger.info(f"📤 [HANDLE_NAME_INPUT] Марка: {user_data.get('selected_brand')}")
-        if "selected_model" in user_data:
-            logger.info(f"📤 [HANDLE_NAME_INPUT] Модель: {user_data.get('selected_model')}")
+        # Собираем данные для отправки в Airtable
+        lead_data = {
+            "name": name.strip(),
+            "phone": phone_number,
+            "username": chat_id,  # В WhatsApp chat_id — это и есть уникальный идентификатор
+        }
+
+        # Добавляем данные о товаре и автомобиле (если есть)
         if "selected_category" in user_data:
-            logger.info(f"📤 [HANDLE_NAME_INPUT] Категория: {user_data.get('selected_category')}")
+            lead_data["category"] = user_data["selected_category"]
+            logger.info(f"📤 [HANDLE_NAME_INPUT] Категория: {user_data['selected_category']}")
 
-        if request_type == "callback":
-            # Заявка на обратный звонок
-            logger.info(f"📞 [CALLBACK] Сохранение запроса на обратный звонок")
-            success = await send_callback_request_to_airtable(
-                config=config,
-                user_data=user_data,
-                client_name=name.strip(),
-                client_phone=phone_number,
-                chat_id=chat_id
-            )
-        else:
-            # Обычный заказ товара
-            logger.info(f"🛒 [ORDER] Сохранение заказа товара")
-            success = await send_whatsapp_order_to_airtable(
-                config=config,
-                user_data=user_data,
-                client_name=name.strip(),
-                client_phone=phone_number,
-                chat_id=chat_id,
-                session=session  # ✅ Передаём session!
-            )
+        if "selected_brand" in user_data:
+            lead_data["car_brand"] = user_data["selected_brand"]
+            logger.info(f"📤 [HANDLE_NAME_INPUT] Марка: {user_data['selected_brand']}")
 
-        if success:
-            logger.info("✅ [HANDLE_NAME_INPUT] ===== ЗАЯВКА УСПЕШНО СОХРАНЕНА В AIRTABLE =====")
+        if "selected_model" in user_data:
+            lead_data["car_model"] = user_data["selected_model"]
+            logger.info(f"📤 [HANDLE_NAME_INPUT] Модель: {user_data['selected_model']}")
+
+        # Добавляем опции (если есть)
+        if "selected_options" in user_data:
+            options_list = user_data["selected_options"]
+            if isinstance(options_list, list):
+                lead_data["options"] = ", ".join(options_list)
+            else:
+                lead_data["options"] = str(options_list)
+            logger.info(f"📤 [HANDLE_NAME_INPUT] Опции: {lead_data['options']}")
+
+        # Добавляем цену (если есть)
+        if "total_price" in user_data and user_data["total_price"]:
+            lead_data["price"] = user_data["total_price"]
+            logger.info(f"📤 [HANDLE_NAME_INPUT] Цена: {user_data['total_price']} сом")
+
+        # Отправляем в Airtable
+        logger.info(f"🚀 [HANDLE_NAME_INPUT] Вызов create_lead...")
+        record_id = await create_lead(lead_data, tenant_slug=config.bot.tenant_slug)
+
+        if record_id:
+            logger.info(f"✅ [HANDLE_NAME_INPUT] ===== ЗАЯВКА УСПЕШНО СОХРАНЕНА В AIRTABLE =====")
+            logger.info(f"✅ [HANDLE_NAME_INPUT] Record ID: {record_id}")
         else:
             logger.error("❌ [HANDLE_NAME_INPUT] ===== НЕ УДАЛОСЬ СОХРАНИТЬ ЗАЯВКУ В AIRTABLE =====")
-            logger.error(f"❌ [HANDLE_NAME_INPUT] Success = False, но исключения не было")
+            logger.error(f"❌ [HANDLE_NAME_INPUT] create_lead вернул None")
+
     except Exception as e:
         logger.exception("!!! [HANDLE_NAME_INPUT] КРИТИЧЕСКАЯ ОШИБКА СОХРАНЕНИЯ ЗАЯВКИ В AIRTABLE !!!")
         logger.error(f"❌ [HANDLE_NAME_INPUT] Тип ошибки: {type(e).__name__}")
