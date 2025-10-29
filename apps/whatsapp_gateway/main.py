@@ -58,9 +58,29 @@ from packages.core.utils.category_mapper import get_category_name
 from .state_manager import get_state, get_user_data, WhatsAppState, set_state, update_user_data
 from . import whatsapp_handlers
 
+# Импортируем модульные обработчики для каждого арендатора
+from .tenant_handlers import evopoliki_handler, five_deluxe_handler
+
 # Глобальный словарь AssistantManager для каждого tenant
 # Формат: {tenant_slug: AssistantManager}
 tenant_assistant_managers: Dict[str, AssistantManager] = {}
+
+# ============================================================================
+# TENANT HANDLERS DISPATCHER
+# ============================================================================
+
+# Диспетчер обработчиков меню для каждого арендатора
+# Ключ: tenant_slug, Значение: функция-обработчик
+TENANT_MENU_HANDLERS = {
+    'evopoliki': evopoliki_handler.handle_evopoliki_menu,
+    'five_deluxe': five_deluxe_handler.handle_5deluxe_menu,
+}
+
+# Диспетчер обработчиков сообщений для каждого арендатора
+TENANT_MESSAGE_HANDLERS = {
+    'evopoliki': None,  # evopoliki использует общие обработчики
+    'five_deluxe': five_deluxe_handler.handle_5deluxe_message,
+}
 
 # Глобальные переменные для БД (инициализируются в lifespan)
 db_engine = None
@@ -312,6 +332,115 @@ class GreenAPIClient:
             logger.error(f"❌ Exception while sending message: {e}")
             return False
 
+    async def send_interactive_list(
+        self,
+        chat_id: str,
+        header: str,
+        body: str,
+        footer: str,
+        button_text: str,
+        sections: list
+    ) -> bool:
+        """
+        Отправляет интерактивный список в WhatsApp через GreenAPI.
+
+        Args:
+            chat_id: ID чата (номер телефона в формате 79001234567@c.us)
+            header: Заголовок сообщения
+            body: Основной текст
+            footer: Нижний текст (footer)
+            button_text: Текст кнопки открытия списка
+            sections: Список секций с элементами [{"title": "...", "rows": [...]}]
+
+        Returns:
+            True если успешно отправлено, False если ошибка
+        """
+        url = f"{self.base_url}/sendMessage/{self.tenant_config.api_token}"
+
+        payload = {
+            "chatId": chat_id,
+            "message": {
+                "text": body
+            },
+            "quotedMessageId": None,
+            "linkPreview": False
+        }
+
+        # GreenAPI использует простые кнопки (buttons) для списков
+        # Конвертируем sections в простой текст с нумерацией
+        # Так как GreenAPI не поддерживает interactive lists в бесплатной версии
+        # Используем текстовое меню с улучшенным форматированием
+
+        message_parts = [f"*{header}*", "", body, ""]
+
+        for section in sections:
+            section_title = section.get("title", "")
+            rows = section.get("rows", [])
+
+            message_parts.append(f"*{section_title}*")
+
+            for idx, row in enumerate(rows, 1):
+                title = row.get("title", "")
+                description = row.get("description", "")
+                message_parts.append(f"{idx}️⃣ {title}")
+                if description:
+                    message_parts.append(f"   _{description}_")
+
+            message_parts.append("")  # Пустая строка между секциями
+
+        if footer:
+            message_parts.append(f"_{footer}_")
+
+        formatted_message = "\n".join(message_parts)
+
+        payload["message"]["text"] = formatted_message
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, json=payload, timeout=10.0)
+
+                if response.status_code == 200:
+                    logger.info(f"✅ Interactive list sent to {chat_id}")
+                    return True
+                else:
+                    logger.error(f"❌ Failed to send interactive list: {response.status_code} - {response.text}")
+                    # Fallback - отправляем как обычное сообщение
+                    return await self.send_message(chat_id, formatted_message)
+
+        except Exception as e:
+            logger.error(f"❌ Exception while sending interactive list: {e}")
+            # Fallback - отправляем как обычное сообщение
+            return await self.send_message(chat_id, formatted_message)
+
+    async def send_menu_response(self, chat_id: str, menu_data: Dict[str, Any]) -> bool:
+        """
+        Универсальный метод отправки ответа с меню.
+
+        Автоматически определяет тип сообщения и вызывает нужный метод.
+
+        Args:
+            chat_id: ID чата WhatsApp
+            menu_data: Данные меню от обработчика (dict с type и данными)
+
+        Returns:
+            True если успешно отправлено, False если ошибка
+        """
+        message_type = menu_data.get("type", "text")
+
+        if message_type == "interactive_list":
+            # Отправляем как интерактивный список
+            return await self.send_interactive_list(
+                chat_id=chat_id,
+                header=menu_data.get("header", ""),
+                body=menu_data.get("body", ""),
+                footer=menu_data.get("footer", ""),
+                button_text=menu_data.get("button_text", "Открыть меню"),
+                sections=menu_data.get("sections", [])
+            )
+        else:
+            # Отправляем как обычное текстовое сообщение
+            return await self.send_message(chat_id, menu_data.get("message", ""))
+
 
 # ============================================================================
 # WEBHOOK HANDLERS
@@ -395,25 +524,17 @@ async def handle_incoming_message(
         # ====================================================================
         if text_message.lower().startswith("ask_ai:"):
             logger.info(f"🔍 [AI_DEBUG] Detected ask_ai command from {chat_id}")
-            
-            # Загружаем конфигурацию tenant
-            tenant_config = TenantConfig(tenant_slug)
-            if not tenant_config.is_valid():
-                logger.error(f"❌ Invalid tenant config for {tenant_slug}")
-                return
-            
-            # Импортируем обработчик
-            from ivr_handlers_5deluxe import handle_ask_ai_whatsapp
+            logger.warning("⚠️ [AI_DEBUG] ask_ai command is deprecated and disabled for security")
 
-            # Вызываем обработчик ask_ai (передаем tenant_config вместо config)
-            response = await handle_ask_ai_whatsapp(chat_id, text_message, tenant_config)
-            
-            # Отправляем ответ
-            if response:  # Может вернуть пустую строку для неавторизованных пользователей
+            # Возвращаем уведомление что команда отключена
+            tenant_config = TenantConfig(tenant_slug)
+            if tenant_config.is_valid():
                 client = GreenAPIClient(tenant_config)
-                await client.send_message(chat_id, response)
-                logger.info(f"✅ [AI_DEBUG] Sent response to {sender_name}")
-            
+                await client.send_message(
+                    chat_id,
+                    "⚠️ Отладочная команда ask_ai отключена. Используйте обычные команды меню."
+                )
+
             return  # Выходим, не обрабатывая дальше
 
         # ====================================================================
@@ -506,11 +627,19 @@ async def handle_incoming_message(
                 except Exception as e:
                     logger.warning(f"⚠️ [MEMORY] Ошибка очистки: {e}")
 
-                # Показываем IVR меню
-                if tenant_slug == "five_deluxe":
-                    from ivr_handlers_5deluxe import handle_5deluxe_message
-                    response = await handle_5deluxe_message(chat_id, text_message, tenant_config, session, sender_name=sender_name)
+                # Показываем меню через диспетчер
+                menu_handler = TENANT_MENU_HANDLERS.get(tenant_slug)
+                if menu_handler:
+                    logger.info(f"📋 [MENU] Using tenant handler for {tenant_slug}")
+                    menu_data = await menu_handler(chat_id, tenant_config, sender_name)
+
+                    # Отправляем меню через универсальный метод
+                    client = GreenAPIClient(tenant_config)
+                    await client.send_menu_response(chat_id, menu_data)
+                    logger.info(f"✅ [MENU] Menu sent to {sender_name}")
+                    return
                 else:
+                    logger.warning(f"⚠️ [MENU] No handler found for {tenant_slug}, using fallback")
                     response = await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
             else:
                 # Роутим через AI Assistant
@@ -520,12 +649,26 @@ async def handle_incoming_message(
             # ========== РЕЖИМ IVR ONLY ==========
             logger.info(f"📋 [ROUTING] Dialog mode DISABLED -> IVR menu flow ONLY")
 
-            # Используем только IVR обработчики
-            if tenant_slug == "five_deluxe":
-                from ivr_handlers_5deluxe import handle_5deluxe_message
-                response = await handle_5deluxe_message(chat_id, text_message, tenant_config, session, sender_name=sender_name)
+            # Используем диспетчер для обработки сообщений
+            message_handler = TENANT_MESSAGE_HANDLERS.get(tenant_slug)
+
+            if message_handler:
+                # Используем специфичный обработчик арендатора
+                logger.info(f"📋 [IVR] Using tenant message handler for {tenant_slug}")
+                response = await message_handler(chat_id, text_message, tenant_config, session, sender_name)
             else:
-                # Для evopoliki создадим базовый IVR
+                # Используем меню по умолчанию для команды "меню"
+                if text_message.lower() in ["меню", "menu", "/start", "start"]:
+                    menu_handler = TENANT_MENU_HANDLERS.get(tenant_slug)
+                    if menu_handler:
+                        menu_data = await menu_handler(chat_id, tenant_config, sender_name)
+                        client = GreenAPIClient(tenant_config)
+                        await client.send_menu_response(chat_id, menu_data)
+                        logger.info(f"✅ [IVR] Menu sent to {sender_name}")
+                        return
+
+                # Fallback: используем общий обработчик evopoliki
+                logger.warning(f"⚠️ [IVR] No handler for {tenant_slug}, using default")
                 response = await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
 
         # Отправляем ответ
