@@ -1,0 +1,21 @@
+# Core dependencies
+fastapi==0.115.6
+uvicorn==0.34.0
+httpx==0.28.1
+python-dotenv==1.1.1
+
+# Database
+SQLAlchemy==2.0.43
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
+alembic==1.16.5
+
+# OpenAI
+openai==1.59.7
+
+# Airtable
+pyairtable==2.3.3
+
+# Utils
+aiofiles==24.1.0
+pydantic==2.11.10

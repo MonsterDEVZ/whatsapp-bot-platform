@@ -1,0 +1,13 @@
+# WhatsApp Gateway Dependencies
+
+# Web Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+
+# HTTP Client
+httpx==0.26.0
+
+# Environment Variables
+python-dotenv==1.0.0
+
+# Note: Core dependencies (aiogram, sqlalchemy, etc.) are inherited from main project
