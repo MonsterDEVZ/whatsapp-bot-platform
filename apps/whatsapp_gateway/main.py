@@ -88,6 +88,10 @@ async def lifespan(app: FastAPI):
     if not database_url:
         raise ValueError("DATABASE_URL не установлен в переменных окружения!")
 
+    # Конвертируем postgresql:// в postgresql+asyncpg:// для async engine
+    if database_url.startswith("postgresql://"):
+        database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
     # Создаем async engine
     db_engine = create_async_engine(
         database_url,
