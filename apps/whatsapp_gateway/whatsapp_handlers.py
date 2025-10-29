@@ -1146,8 +1146,8 @@ async def handle_name_input(chat_id: str, name: str, config: Config, session) ->
     # 4. Отправляем данные в Airtable
     record_id = None
     try:
-        logger.info(f"🚀 [HANDLE_NAME_INPUT] Вызов create_lead(tenant_slug={config.bot.tenant_slug})...")
-        record_id = await create_lead(lead_data, tenant_slug=config.bot.tenant_slug)
+        logger.info(f"🚀 [HANDLE_NAME_INPUT] Вызов create_lead(tenant_slug={config.tenant_slug})...")
+        record_id = await create_lead(lead_data, tenant_slug=config.tenant_slug)
     except Exception as e:
         logger.exception("!!! [HANDLE_NAME_INPUT] КРИТИЧЕСКАЯ ОШИБКА ПРИ ВЫЗОВЕ create_lead !!!")
         logger.error(f"❌ [HANDLE_NAME_INPUT] Тип ошибки: {type(e).__name__}")
