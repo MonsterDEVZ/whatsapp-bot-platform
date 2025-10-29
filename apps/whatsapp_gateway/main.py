@@ -875,33 +875,38 @@ async def route_message_by_state(
                     )
 
                 # ============================================================
-                # СУЩЕСТВУЮЩИЙ СЦЕНАРИЙ: ORDER (Заказ товара)
+                # СЦЕНАРИЙ: ORDER (AI как умный маршрутизатор в воронку)
                 # ============================================================
                 elif intent == "ORDER" or "category" in parsed_data:
-                    logger.info(f"🛒 [ORDER] Обнаружен JSON с намерением заказа")
+                    logger.info(f"🛒 [AI_ROUTER] Обнаружен JSON с намерением ORDER")
 
                     order_data = extract_order_data(parsed_data)
 
-                    # Извлекаем данные
+                    # Извлекаем данные, которые смог распознать AI
                     category = order_data.get("category")
                     brand = order_data.get("brand")
                     model = order_data.get("model")
 
-                    # КРИТИЧЕСКАЯ ПРОВЕРКА: AI Assistant ОБЯЗАН вернуть category!
+                    logger.info(f"🧠 [AI_ROUTER] AI извлек: category={category}, brand={brand}, model={model}")
+
+                    # ═══════════════════════════════════════════════════════════════
+                    # УМНАЯ МАРШРУТИЗАЦИЯ: Запускаем воронку с нужного шага
+                    # ═══════════════════════════════════════════════════════════════
+
+                    # СЦЕНАРИЙ 4: AI не понял категорию → Показываем меню категорий
                     if not category:
-                        logger.error(f"❌ [AI_RESPONSE] AI Assistant не вернул category в ORDER JSON!")
-                        logger.error(f"❌ [AI_RESPONSE] order_data: {order_data}")
-                        return "❌ Ошибка: не удалось определить категорию товара. Попробуйте ещё раз."
+                        logger.info("🎯 [AI_ROUTER] Категория не распознана → Показываем главное меню")
+                        return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
 
-                    # Устанавливаем начальное состояние для сценария ORDER
+                    # Получаем читаемое название категории
+                    category_name = get_category_name(category, tenant_config.i18n)
+                    logger.info(f"🏷️  [AI_ROUTER] category={category} → category_name={category_name}")
+
+                    # СЦЕНАРИЙ 3: AI распознал category + brand + model → Ищем лекала
                     if brand and model:
-                        # Есть и марка и модель - запускаем поиск лекал
-                        logger.info(f"📋 Запуск поиска лекал: {brand} {model}")
+                        logger.info(f"🎯 [AI_ROUTER] ШАГ 3: Полные данные → Поиск лекал для {brand} {model}")
 
-                        # Сохраняем данные в состояние
-                        category_name = get_category_name(category, tenant_config.i18n)
-                        logger.info(f"🏷️  [CATEGORY_FIX] category={category} -> category_name={category_name}")
-
+                        # Сохраняем все данные в сессию
                         update_user_data(chat_id, {
                             "category": category,
                             "category_name": category_name,
@@ -909,36 +914,50 @@ async def route_message_by_state(
                             "model_name": model
                         })
 
-                        # Устанавливаем состояние ожидания модели (для корректного флоу)
+                        # Устанавливаем состояние
                         set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
 
-                        # Запускаем поиск лекал
-                        logger.info(f"🚀 [FSM_START] Запуск поиска лекал для {brand} {model} (category: {category})")
+                        # Запускаем поиск лекал (воронка начинается с шага 3)
+                        logger.info(f"🚀 [AI_ROUTER] Запуск search_patterns_for_model")
                         return await whatsapp_handlers.search_patterns_for_model(
                             chat_id, model, brand, category, tenant_config, session
                         )
 
+                    # СЦЕНАРИЙ 2: AI распознал category + brand → Показываем модели
                     elif brand:
-                        # Есть только марка - показываем модели
-                        logger.info(f"📋 Показываем модели для марки: {brand}")
+                        logger.info(f"🎯 [AI_ROUTER] ШАГ 2: Есть марка '{brand}' → Показываем модели")
 
-                        category_name = get_category_name(category, tenant_config.i18n)
-                        logger.info(f"🏷️  [CATEGORY_FIX] category={category} -> category_name={category_name}")
-
+                        # Сохраняем данные в сессию
                         update_user_data(chat_id, {
                             "category": category,
                             "category_name": category_name,
                             "brand_name": brand
                         })
 
+                        # Устанавливаем состояние
                         set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
 
+                        # Показываем модели для выбранной марки (воронка начинается с шага 2)
+                        logger.info(f"🚀 [AI_ROUTER] Запуск show_models_page для {brand}")
                         return await whatsapp_handlers.show_models_page(chat_id, 1, brand, tenant_config, session)
 
+                    # СЦЕНАРИЙ 1: AI распознал только category → Показываем марки
                     else:
-                        # Намерение заказа есть, но данных недостаточно - показываем меню
-                        logger.info("⚠️ Намерение заказа без марки/модели - показываем меню")
-                        return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
+                        logger.info(f"🎯 [AI_ROUTER] ШАГ 1: Есть категория '{category_name}' → Показываем марки")
+
+                        # Сохраняем данные в сессию
+                        update_user_data(chat_id, {
+                            "category": category,
+                            "category_name": category_name,
+                            "brands_page": 1
+                        })
+
+                        # Устанавливаем состояние
+                        set_state(chat_id, WhatsAppState.EVA_WAITING_BRAND)
+
+                        # Показываем марки (воронка начинается с шага 1)
+                        logger.info(f"🚀 [AI_ROUTER] Запуск show_brands_page")
+                        return await whatsapp_handlers.show_brands_page(chat_id, 1, tenant_config, session)
 
             else:
                 # Текстовый ответ (FAQ) - форматируем для WhatsApp и отправляем
@@ -995,30 +1014,36 @@ async def route_message_by_state(
                         else:
                             return "Извините, произошла ошибка. Попробуйте отправить 'Меню'."
 
-                    # JSON ответ с намерением заказа - запускаем FSM сценарий
-                    logger.info(f"🛒 Обнаружен JSON с намерением заказа: {parsed_data}")
+                    # JSON ответ с намерением заказа - используем умную маршрутизацию
+                    logger.info(f"🛒 [AI_ROUTER] Обнаружен JSON с намерением ORDER: {parsed_data}")
 
                     order_data = extract_order_data(parsed_data)
 
-                    # Извлекаем данные
+                    # Извлекаем данные, которые смог распознать AI
                     category = order_data.get("category")
                     brand = order_data.get("brand")
                     model = order_data.get("model")
 
-                    # КРИТИЧЕСКАЯ ПРОВЕРКА: AI Assistant ОБЯЗАН вернуть category!
+                    logger.info(f"🧠 [AI_ROUTER] AI извлек: category={category}, brand={brand}, model={model}")
+
+                    # ═══════════════════════════════════════════════════════════════
+                    # УМНАЯ МАРШРУТИЗАЦИЯ: Запускаем воронку с нужного шага
+                    # ═══════════════════════════════════════════════════════════════
+
+                    # СЦЕНАРИЙ 4: AI не понял категорию → Показываем меню категорий
                     if not category:
-                        logger.error(f"❌ [AI_RESPONSE] AI Assistant не вернул category в ORDER JSON!")
-                        logger.error(f"❌ [AI_RESPONSE] order_data: {order_data}")
-                        return "❌ Ошибка: не удалось определить категорию товара. Попробуйте ещё раз."
+                        logger.info("🎯 [AI_ROUTER] Категория не распознана → Показываем главное меню")
+                        return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
 
+                    # Получаем читаемое название категории
+                    category_name = get_category_name(category, tenant_config.i18n)
+                    logger.info(f"🏷️  [AI_ROUTER] category={category} → category_name={category_name}")
+
+                    # СЦЕНАРИЙ 3: AI распознал category + brand + model → Ищем лекала
                     if brand and model:
-                        # Есть и марка и модель - запускаем поиск лекал
-                        logger.info(f"📋 Запуск поиска лекал: {brand} {model}")
+                        logger.info(f"🎯 [AI_ROUTER] ШАГ 3: Полные данные → Поиск лекал для {brand} {model}")
 
-                        # Сохраняем данные в состояние
-                        category_name = get_category_name(category, tenant_config.i18n)
-                        logger.info(f"🏷️  [CATEGORY_FIX] category={category} -> category_name={category_name}")
-
+                        # Сохраняем все данные в сессию
                         update_user_data(chat_id, {
                             "category": category,
                             "category_name": category_name,
@@ -1026,35 +1051,50 @@ async def route_message_by_state(
                             "model_name": model
                         })
 
-                        # Устанавливаем состояние ожидания модели (для корректного флоу)
+                        # Устанавливаем состояние
                         set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
 
-                        # Запускаем поиск лекал
+                        # Запускаем поиск лекал (воронка начинается с шага 3)
+                        logger.info(f"🚀 [AI_ROUTER] Запуск search_patterns_for_model")
                         return await whatsapp_handlers.search_patterns_for_model(
                             chat_id, model, brand, category, tenant_config, session
                         )
 
+                    # СЦЕНАРИЙ 2: AI распознал category + brand → Показываем модели
                     elif brand:
-                        # Есть только марка - показываем модели
-                        logger.info(f"📋 Показываем модели для марки: {brand}")
+                        logger.info(f"🎯 [AI_ROUTER] ШАГ 2: Есть марка '{brand}' → Показываем модели")
 
-                        category_name = get_category_name(category, tenant_config.i18n)
-                        logger.info(f"🏷️  [CATEGORY_FIX] category={category} -> category_name={category_name}")
-
+                        # Сохраняем данные в сессию
                         update_user_data(chat_id, {
                             "category": category,
                             "category_name": category_name,
                             "brand_name": brand
                         })
 
+                        # Устанавливаем состояние
                         set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
 
+                        # Показываем модели для выбранной марки (воронка начинается с шага 2)
+                        logger.info(f"🚀 [AI_ROUTER] Запуск show_models_page для {brand}")
                         return await whatsapp_handlers.show_models_page(chat_id, 1, brand, tenant_config, session)
 
+                    # СЦЕНАРИЙ 1: AI распознал только category → Показываем марки
                     else:
-                        # Намерение заказа есть, но данных недостаточно - показываем меню
-                        logger.info("⚠️ Намерение заказа без марки/модели - показываем меню")
-                        return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
+                        logger.info(f"🎯 [AI_ROUTER] ШАГ 1: Есть категория '{category_name}' → Показываем марки")
+
+                        # Сохраняем данные в сессию
+                        update_user_data(chat_id, {
+                            "category": category,
+                            "category_name": category_name,
+                            "brands_page": 1
+                        })
+
+                        # Устанавливаем состояние
+                        set_state(chat_id, WhatsAppState.EVA_WAITING_BRAND)
+
+                        # Показываем марки (воронка начинается с шага 1)
+                        logger.info(f"🚀 [AI_ROUTER] Запуск show_brands_page")
+                        return await whatsapp_handlers.show_brands_page(chat_id, 1, tenant_config, session)
 
                 else:
                     # Текстовый ответ (FAQ) - форматируем для WhatsApp и отправляем
