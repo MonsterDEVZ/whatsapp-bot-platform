@@ -38,7 +38,6 @@ class WhatsAppState:
 
     # Сбор контактов
     WAITING_FOR_NAME = "waiting_for_name"
-    WAITING_FOR_PHONE = "waiting_for_phone"
 
     # Связь с менеджером
     CONTACT_MANAGER = "contact_manager"

@@ -761,7 +761,7 @@ def is_ivr_command(text: str, state: WhatsAppState) -> bool:
         return text.lower() in positive_answers
 
     # Сбор контактов - любой текст является ожидаемым вводом
-    elif state in [WhatsAppState.WAITING_FOR_NAME, WhatsAppState.WAITING_FOR_PHONE]:
+    elif state == WhatsAppState.WAITING_FOR_NAME:
         return True
 
     # Для всех остальных состояний - не IVR-команда
@@ -825,9 +825,35 @@ async def route_message_by_state(
                 logger.info(f"🎯 Обнаружен JSON с намерением: {intent}")
 
                 # ============================================================
+                # СЦЕНАРИЙ: SHOW_CATALOG / SHOW_MAIN_MENU (Показ меню)
+                # ============================================================
+                if intent in ["SHOW_CATALOG", "SHOW_MAIN_MENU"]:
+                    logger.info(f"📋 [{intent}] AI запросил показ меню")
+
+                    # Вызываем обработчик меню для текущего tenant
+                    menu_handler = TENANT_MENU_HANDLERS.get(tenant_slug)
+
+                    if menu_handler:
+                        logger.info(f"✅ [{intent}] Вызываем menu handler для {tenant_slug}")
+                        menu_data = await menu_handler(chat_id, tenant_config, "Гость")
+
+                        # Отправляем меню
+                        client = GreenAPIClient(tenant_config)
+                        await client.send_menu_response(chat_id, menu_data)
+
+                        # КРИТИЧНО: Устанавливаем состояние ожидания выбора категории
+                        set_state(chat_id, WhatsAppState.WAITING_FOR_CATEGORY_CHOICE)
+                        logger.info(f"🔄 [STATE] User {chat_id} state → WAITING_FOR_CATEGORY_CHOICE")
+
+                        return ""  # Пустой ответ, т.к. меню уже отправлено
+                    else:
+                        logger.error(f"❌ [{intent}] Menu handler не найден для {tenant_slug}")
+                        return "Извините, произошла ошибка. Попробуйте отправить 'Меню'."
+
+                # ============================================================
                 # НОВЫЙ СЦЕНАРИЙ: CALLBACK_REQUEST (Запрос на обратный звонок)
                 # ============================================================
-                if intent == "CALLBACK_REQUEST":
+                elif intent == "CALLBACK_REQUEST":
                     logger.info(f"📞 [CALLBACK_REQUEST] Запрос на обратный звонок")
 
                     # Извлекаем детали вопроса
@@ -950,8 +976,27 @@ async def route_message_by_state(
                 response_type, parsed_data = detect_response_type(response)
 
                 if response_type == "json" and parsed_data:
+                    # Проверяем тип намерения
+                    intent = parsed_data.get("intent", "order").upper()
+                    logger.info(f"🎯 Обнаружен JSON с намерением: {intent}")
+
+                    # Обработка SHOW_CATALOG / SHOW_MAIN_MENU
+                    if intent in ["SHOW_CATALOG", "SHOW_MAIN_MENU"]:
+                        logger.info(f"📋 [{intent}] AI запросил показ меню")
+
+                        menu_handler = TENANT_MENU_HANDLERS.get(tenant_slug)
+                        if menu_handler:
+                            menu_data = await menu_handler(chat_id, tenant_config, "Гость")
+                            client = GreenAPIClient(tenant_config)
+                            await client.send_menu_response(chat_id, menu_data)
+                            set_state(chat_id, WhatsAppState.WAITING_FOR_CATEGORY_CHOICE)
+                            logger.info(f"🔄 [STATE] User {chat_id} state → WAITING_FOR_CATEGORY_CHOICE")
+                            return ""
+                        else:
+                            return "Извините, произошла ошибка. Попробуйте отправить 'Меню'."
+
                     # JSON ответ с намерением заказа - запускаем FSM сценарий
-                    logger.info(f"🎯 Обнаружен JSON с намерением заказа: {parsed_data}")
+                    logger.info(f"🛒 Обнаружен JSON с намерением заказа: {parsed_data}")
 
                     order_data = extract_order_data(parsed_data)
 
@@ -1111,12 +1156,9 @@ async def route_message_by_state(
         return await whatsapp_handlers.handle_order_confirmation(chat_id, text, tenant_config)
 
     # Сбор контактов: ожидание имени
+    # Телефон автоматически извлекается из chat_id внутри handle_name_input
     elif current_state == WhatsAppState.WAITING_FOR_NAME:
         return await whatsapp_handlers.handle_name_input(chat_id, text, tenant_config, session)  # ✅ Передаём session!
-
-    # Сбор контактов: ожидание телефона
-    elif current_state == WhatsAppState.WAITING_FOR_PHONE:
-        return await whatsapp_handlers.handle_phone_input(chat_id, text, tenant_config)
 
     # Связь с менеджером
     elif current_state == WhatsAppState.CONTACT_MANAGER:
