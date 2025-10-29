@@ -51,7 +51,7 @@ async def handle_evopoliki_menu(chat_id: str, tenant_config, sender_name: str = 
         catalog_rows.append({
             "id": callback_data,  # Например: "category:eva_mats"
             "title": text,  # Название категории
-            "description": f"Выбрать {text}"
+            "description": ""  # Убираем дублирование текста
         })
 
     sections.append({
