@@ -29,7 +29,7 @@ async def handle_evopoliki_menu(chat_id: str, tenant_config, sender_name: str = 
     i18n = tenant_config.i18n
 
     # Получаем категории из локализации
-    catalog_categories = i18n.get("buttons.catalog_categories", [])
+    catalog_categories = i18n.get("buttons.catalog_categories") or []
 
     if not catalog_categories or len(catalog_categories) == 0:
         logger.error("❌ [EVOPOLIKI] catalog_categories not found or empty!")
@@ -64,7 +64,7 @@ async def handle_evopoliki_menu(chat_id: str, tenant_config, sender_name: str = 
     return {
         "type": "interactive_list",
         "header": f"Привет, {sender_name}! 👋",
-        "body": i18n.get("start.welcome", "Добро пожаловать! Выберите раздел из меню:"),
+        "body": i18n.get("start.welcome") or "Добро пожаловать! Выберите раздел из меню:",
         "footer": "EVOPOLIKI - Автоаксессуары премиум-класса",
         "button_text": "📋 Открыть меню",
         "sections": sections
@@ -107,7 +107,7 @@ async def handle_evopoliki_list_response(
             # Но нам нужно симулировать выбор пункта меню
             # Найдем индекс категории в списке
             i18n = tenant_config.i18n
-            catalog_categories = i18n.get("buttons.catalog_categories", [])
+            catalog_categories = i18n.get("buttons.catalog_categories") or []
 
             # Находим индекс выбранной категории
             for idx, category in enumerate(catalog_categories, start=1):
@@ -126,6 +126,6 @@ async def handle_evopoliki_list_response(
                 "application_type": "Запрос на звонок"
             })
 
-            return i18n.get("contact_manager.text", "📞 Введите ваше имя, и мы свяжемся с вами.")
+            return i18n.get("contact_manager.text") or "📞 Введите ваше имя, и мы свяжемся с вами."
 
     return "❌ Неизвестная команда. Отправьте 'Меню' для возврата."

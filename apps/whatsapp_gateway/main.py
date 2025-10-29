@@ -637,6 +637,10 @@ async def handle_incoming_message(
                     client = GreenAPIClient(tenant_config)
                     await client.send_menu_response(chat_id, menu_data)
                     logger.info(f"✅ [MENU] Menu sent to {sender_name}")
+
+                    # Устанавливаем состояние ожидания выбора категории
+                    set_state(chat_id, WhatsAppState.WAITING_FOR_CATEGORY_CHOICE)
+                    logger.info(f"🔄 [STATE] User {chat_id} state changed to WAITING_FOR_CATEGORY_CHOICE")
                     return
                 else:
                     logger.warning(f"⚠️ [MENU] No handler found for {tenant_slug}, using fallback")
@@ -665,6 +669,10 @@ async def handle_incoming_message(
                         client = GreenAPIClient(tenant_config)
                         await client.send_menu_response(chat_id, menu_data)
                         logger.info(f"✅ [IVR] Menu sent to {sender_name}")
+
+                        # Устанавливаем состояние ожидания выбора категории
+                        set_state(chat_id, WhatsAppState.WAITING_FOR_CATEGORY_CHOICE)
+                        logger.info(f"🔄 [STATE] User {chat_id} state changed to WAITING_FOR_CATEGORY_CHOICE")
                         return
 
                 # Fallback: используем общий обработчик evopoliki
@@ -1008,6 +1016,41 @@ async def route_message_by_state(
                     logger.info("📝 Текстовый ответ (FAQ)")
                     formatted_response = format_response_for_platform(response, "whatsapp")
                     return formatted_response
+
+            except Exception as e:
+                logger.error(f"❌ Ошибка при обращении к Ассистенту: {e}")
+
+                # Fallback: показываем главное меню
+                return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
+
+    # Ожидание выбора категории из меню
+    elif current_state == WhatsAppState.WAITING_FOR_CATEGORY_CHOICE:
+        logger.info(f"🎯 [ROUTE] WAITING_FOR_CATEGORY_CHOICE state - processing menu selection: '{text}'")
+
+        # Проверяем, является ли ввод цифрой (выбор категории из меню)
+        if text.strip().isdigit():
+            # Это выбор категории - обрабатываем через IVR
+            logger.info(f"✅ [ROUTE] User selected category number: {text}")
+            return await whatsapp_handlers.handle_main_menu_choice(chat_id, text, tenant_config, session)
+        else:
+            # Если это не цифра, возможно пользователь хочет задать вопрос
+            # Отправляем в AI Assistant для консультации
+            logger.info(f"🤖 [ROUTE] Non-numeric input in category selection - routing to AI: '{text}'")
+            logger.info("=" * 60)
+            logger.info("🤖 *** AI HANDLER TRIGGERED *** 🤖")
+            logger.info("=" * 60)
+
+            # Получаем или создаем thread для пользователя
+            thread_id = get_or_create_thread(chat_id, assistant_manager)
+
+            try:
+                # Получаем ответ от Ассистента с передачей chat_id для сохранения истории
+                response = await assistant_manager.get_response(thread_id, text, chat_id=chat_id)
+                logger.info(f"✅ Получен ответ от Ассистента ({len(response)} символов)")
+
+                # Форматируем ответ для WhatsApp
+                formatted_response = format_response_for_platform(response, "whatsapp")
+                return formatted_response
 
             except Exception as e:
                 logger.error(f"❌ Ошибка при обращении к Ассистенту: {e}")

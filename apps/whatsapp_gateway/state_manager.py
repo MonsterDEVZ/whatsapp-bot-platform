@@ -28,6 +28,7 @@ class WhatsAppState:
 
     # Главное меню
     MAIN_MENU = "main_menu"
+    WAITING_FOR_CATEGORY_CHOICE = "waiting_for_category_choice"
 
     # Сценарий EVA-коврики
     EVA_WAITING_BRAND = "eva_waiting_brand"
