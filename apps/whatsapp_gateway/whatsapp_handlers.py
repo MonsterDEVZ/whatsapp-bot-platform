@@ -880,10 +880,8 @@ async def handle_order_confirmation(chat_id: str, confirmation: str, config: Con
         set_state(chat_id, WhatsAppState.WAITING_FOR_NAME)
 
         return (
-            "✅ <b>Отлично!</b>\n\n"
-            "Теперь мне нужна ваша контактная информация,\n"
-            "чтобы наш менеджер мог с вами связаться.\n\n"
-            "📝 <b>Шаг 1/2:</b> Введите ваше имя"
+            "✅ Отлично! Чтобы завершить оформление, напишите, пожалуйста, ваше имя.\n\n"
+            "Ваш номер телефона мы возьмём автоматически из WhatsApp. 😊"
         )
     else:
         logger.warning(f"⚠️ [ORDER_CONFIRMATION] Неверный ответ: '{confirmation}'")
@@ -1090,28 +1088,45 @@ async def handle_name_input(chat_id: str, name: str, config: Config, session) ->
     Returns:
         Текст ответа
     """
+    logger.info(f"🎯 [HANDLE_NAME_INPUT] ===== НАЧАЛО ОБРАБОТКИ ИМЕНИ =====")
+    logger.info(f"🎯 [HANDLE_NAME_INPUT] Chat ID: {chat_id}")
+    logger.info(f"🎯 [HANDLE_NAME_INPUT] Введённое имя: {name}")
+
     # Сохраняем имя
     update_user_data(chat_id, {"client_name": name.strip()})
+    logger.info(f"✅ [HANDLE_NAME_INPUT] Имя сохранено в user_data")
 
     # ОПТИМИЗАЦИЯ ДЛЯ WHATSAPP:
     # Извлекаем номер телефона из chatId (например, "996777510804@c.us" -> "+996777510804")
     phone_number = extract_phone_from_chat_id(chat_id)
+    logger.info(f"📱 [HANDLE_NAME_INPUT] Извлечённый телефон: {phone_number}")
+
     update_user_data(chat_id, {"client_phone": phone_number})
+    logger.info(f"✅ [HANDLE_NAME_INPUT] Телефон сохранён в user_data")
 
     # Получаем все данные для заявки
     user_data = get_user_data(chat_id)
-
-    # Логируем создание заявки
-    logger.info(f"📝 Application created for {name} (phone: {phone_number})")
-    logger.info(f"📋 Application data: {user_data}")
+    logger.info(f"📋 [HANDLE_NAME_INPUT] Все данные пользователя: {user_data}")
 
     # Проверяем тип заявки
     request_type = user_data.get("request_type", "order")
-    logger.info(f"🔍 Request type: {request_type}")
+    logger.info(f"🔍 [HANDLE_NAME_INPUT] Тип заявки: {request_type}")
 
     # Сохраняем заявку в Airtable
     try:
-        logger.info(f"📤 Пытаюсь сохранить заявку в Airtable...")
+        logger.info(f"📤 [HANDLE_NAME_INPUT] ===== ПОДГОТОВКА К ОТПРАВКЕ В AIRTABLE =====")
+        logger.info(f"📤 [HANDLE_NAME_INPUT] Клиент: {name.strip()}")
+        logger.info(f"📤 [HANDLE_NAME_INPUT] Телефон: {phone_number}")
+        logger.info(f"📤 [HANDLE_NAME_INPUT] Tenant: {config.tenant_slug}")
+        logger.info(f"📤 [HANDLE_NAME_INPUT] Тип заявки: {request_type}")
+
+        # Логируем ключевые данные заказа
+        if "selected_brand" in user_data:
+            logger.info(f"📤 [HANDLE_NAME_INPUT] Марка: {user_data.get('selected_brand')}")
+        if "selected_model" in user_data:
+            logger.info(f"📤 [HANDLE_NAME_INPUT] Модель: {user_data.get('selected_model')}")
+        if "selected_category" in user_data:
+            logger.info(f"📤 [HANDLE_NAME_INPUT] Категория: {user_data.get('selected_category')}")
 
         if request_type == "callback":
             # Заявка на обратный звонок
@@ -1136,12 +1151,15 @@ async def handle_name_input(chat_id: str, name: str, config: Config, session) ->
             )
 
         if success:
-            logger.info("✅ Заявка успешно сохранена в Airtable")
+            logger.info("✅ [HANDLE_NAME_INPUT] ===== ЗАЯВКА УСПЕШНО СОХРАНЕНА В AIRTABLE =====")
         else:
-            logger.error("❌ Не удалось сохранить заявку в Airtable")
+            logger.error("❌ [HANDLE_NAME_INPUT] ===== НЕ УДАЛОСЬ СОХРАНИТЬ ЗАЯВКУ В AIRTABLE =====")
+            logger.error(f"❌ [HANDLE_NAME_INPUT] Success = False, но исключения не было")
     except Exception as e:
-        logger.exception("!!! ОШИБКА СОХРАНЕНИЯ ЗАЯВКИ В AIRTABLE !!!")
-        logger.error(f"❌ Тип ошибки: {type(e).__name__}: {e}")
+        logger.exception("!!! [HANDLE_NAME_INPUT] КРИТИЧЕСКАЯ ОШИБКА СОХРАНЕНИЯ ЗАЯВКИ В AIRTABLE !!!")
+        logger.error(f"❌ [HANDLE_NAME_INPUT] Тип ошибки: {type(e).__name__}")
+        logger.error(f"❌ [HANDLE_NAME_INPUT] Сообщение: {str(e)}")
+        logger.error(f"❌ [HANDLE_NAME_INPUT] Трейсбек выше ^^^")
 
     # Очищаем состояние
     clear_state(chat_id)
