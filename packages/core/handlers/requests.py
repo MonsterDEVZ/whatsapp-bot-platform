@@ -137,7 +137,7 @@ async def send_callback_request_to_airtable(
         airtable_data = {
             "client_name": client_name,
             "client_phone": client_phone,
-            "source": "Telegram Bot",
+            "source": "Telegram",
             "project": config.bot.tenant_slug.upper(),
             "product": product_full_name,
             "details": details_text,
@@ -277,7 +277,7 @@ async def send_detailed_request_card(
         airtable_data = {
             "client_name": client_name,
             "client_phone": client_phone,
-            "source": "Telegram Bot",
+            "source": "Telegram",
             "project": config.bot.tenant_slug.upper(),
             "product": product_full_name,
             "details": details_text,

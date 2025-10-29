@@ -58,7 +58,7 @@ class AirtableService:
             data: Словарь с данными заявки. Ожидаемые ключи:
                 - client_name: Имя клиента
                 - client_phone: Телефон клиента
-                - source: Источник (Telegram Bot / WhatsApp)
+                - source: Источник (Telegram / WhatsApp)
                 - project: Проект/Компания (EVOPOLIKI / 5DELUXE)
                 - product: Товар (категория + марка + модель)
                 - details: Детали заказа (опции, бортики и т.д.)
@@ -74,7 +74,7 @@ class AirtableService:
             >>> record_id = await service.create_application({
             ...     "client_name": "Иван Иванов",
             ...     "client_phone": "+996555123456",
-            ...     "source": "Telegram Bot",
+            ...     "source": "Telegram",
             ...     "project": "EVOPOLIKI",
             ...     "product": "EVA коврики для Toyota Camry",
             ...     "details": "С бортами 5 см",
