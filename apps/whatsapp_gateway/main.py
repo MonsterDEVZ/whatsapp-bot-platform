@@ -41,8 +41,10 @@ for tenant_dir in ["telegram/evopoliki", "telegram/five_deluxe"]:
     else:
         logger.info(f".env file not found at {env_path}, using environment variables")
 
-from packages.core.config import Config, create_config
-from packages.core.db.connection import init_db, close_db, get_session
+from packages.core.config import Config
+from packages.core.db.connection import close_db, get_session
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession as SQLAsyncSession
+from sqlalchemy import text
 from packages.core.memory import init_memory, get_memory
 from packages.core.ai.assistant import AssistantManager, get_or_create_thread
 from packages.core.ai.response_parser import (
@@ -61,6 +63,10 @@ from . import whatsapp_handlers
 # Формат: {tenant_slug: AssistantManager}
 tenant_assistant_managers: Dict[str, AssistantManager] = {}
 
+# Глобальные переменные для БД (инициализируются в lifespan)
+db_engine = None
+db_session_factory = None
+
 
 # ============================================================================
 # LIFESPAN MANAGER
@@ -72,13 +78,40 @@ async def lifespan(app: FastAPI):
     Менеджер жизненного цикла приложения.
     Инициализирует ресурсы при старте и освобождает при остановке.
     """
+    global db_engine, db_session_factory
+
     # Startup
     logger.info("🚀 Starting WhatsApp Gateway...")
 
-    # Инициализируем базу данных (используем config любого tenant, БД общая)
-    db_config = create_config(tenant_slug="evopoliki")
-    await init_db(db_config)
-    logger.info("✅ База данных инициализирована")
+    # Инициализируем базу данных напрямую через DATABASE_URL
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise ValueError("DATABASE_URL не установлен в переменных окружения!")
+
+    # Создаем async engine
+    db_engine = create_async_engine(
+        database_url,
+        echo=False,  # Отключаем SQL логирование для production
+        pool_pre_ping=True,  # Проверять соединение перед использованием
+        pool_size=5,
+        max_overflow=10
+    )
+
+    # Создаем фабрику сессий
+    db_session_factory = async_sessionmaker(
+        db_engine,
+        class_=SQLAsyncSession,
+        expire_on_commit=False
+    )
+
+    # Проверяем подключение
+    try:
+        async with db_engine.begin() as conn:
+            await conn.execute(text("SELECT 1"))
+        logger.info("✅ База данных инициализирована")
+    except Exception as e:
+        logger.error(f"❌ Ошибка подключения к БД: {e}")
+        raise
 
     # Инициализируем DialogMemory (общая для всех tenant)
     dialog_memory = init_memory(max_messages=6)
@@ -92,8 +125,9 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("🛑 Shutting down WhatsApp Gateway...")
-    await close_db()
-    logger.info("✅ База данных закрыта")
+    if db_engine:
+        await db_engine.dispose()
+        logger.info("✅ База данных закрыта")
 
 
 # Создаем FastAPI приложение с lifespan
@@ -114,30 +148,41 @@ class TenantConfig:
 
     def __init__(self, tenant_slug: str):
         self.tenant_slug = tenant_slug
-        
+
         # Формируем префикс с заменой дефиса на подчеркивание
         tenant_prefix = tenant_slug.upper().replace("-", "_")
-        
+
+        # WhatsApp настройки
         self.instance_id = os.getenv(f"{tenant_prefix}_WHATSAPP_INSTANCE_ID")
         self.api_token = os.getenv(f"{tenant_prefix}_WHATSAPP_API_TOKEN")
         self.phone_number = os.getenv(f"{tenant_prefix}_WHATSAPP_PHONE_NUMBER")
         self.api_url = os.getenv(f"{tenant_prefix}_WHATSAPP_API_URL", "https://7107.api.green-api.com")
 
-        # Загружаем Config для этого tenant
-        # Note: env variables are already loaded at module level
-        self.config = create_config(tenant_slug=tenant_slug)
-        
-        # Получаем OpenAI credentials для этого tenant
-        # Проверяем сначала tenant-специфичные переменные, затем общие
-        tenant_prefix = tenant_slug.upper().replace("-", "_")
+        # OpenAI credentials для этого tenant
         self.openai_api_key = (
-            os.getenv(f"{tenant_prefix}_OPENAI_API_KEY") or 
+            os.getenv(f"{tenant_prefix}_OPENAI_API_KEY") or
             os.getenv("OPENAI_API_KEY")
         )
         self.openai_assistant_id = (
-            os.getenv(f"{tenant_prefix}_OPENAI_ASSISTANT_ID") or 
+            os.getenv(f"{tenant_prefix}_OPENAI_ASSISTANT_ID") or
             os.getenv("OPENAI_ASSISTANT_ID")
         )
+
+        # Настройки для диалогового режима (без зависимости от Telegram Config)
+        enable_dialog_mode_str = (
+            os.getenv(f"{tenant_prefix}_ENABLE_DIALOG_MODE") or
+            os.getenv("ENABLE_DIALOG_MODE") or
+            "false"
+        )
+        self.enable_dialog_mode = str(enable_dialog_mode_str).strip().lower() in ("true", "1", "yes")
+
+        # Создаем i18n экземпляр для локализации
+        from packages.core.config import I18nInstance
+        try:
+            self.i18n = I18nInstance(tenant_slug=tenant_slug, language="ru")
+        except FileNotFoundError:
+            logger.warning(f"⚠️  Localization file not found for {tenant_slug}, using default")
+            self.i18n = None
 
     def is_valid(self) -> bool:
         """Проверяет, что все необходимые параметры заданы."""
@@ -337,9 +382,9 @@ async def handle_incoming_message(
             
             # Импортируем обработчик
             from ivr_handlers_5deluxe import handle_ask_ai_whatsapp
-            
-            # Вызываем обработчик ask_ai
-            response = await handle_ask_ai_whatsapp(chat_id, text_message, tenant_config.config)
+
+            # Вызываем обработчик ask_ai (передаем tenant_config вместо config)
+            response = await handle_ask_ai_whatsapp(chat_id, text_message, tenant_config)
             
             # Отправляем ответ
             if response:  # Может вернуть пустую строку для неавторизованных пользователей
@@ -381,8 +426,7 @@ async def handle_incoming_message(
                     # Загружаем конфигурацию tenant
                     tenant_config = TenantConfig(tenant_slug)
                     if tenant_config.is_valid():
-                        config = tenant_config.config
-                        enable_ai = getattr(config.bot, 'enable_dialog_mode', False)
+                        enable_ai = tenant_config.enable_dialog_mode
 
                         logger.info(f"🎯 [TIMEOUT] enable_dialog_mode = {enable_ai}")
 
@@ -394,7 +438,7 @@ async def handle_incoming_message(
                             # IVR РЕЖИМ: Показываем меню
                             logger.info(f"📋 [TIMEOUT] IVR режим → Показываем меню")
 
-                            greeting_response = await whatsapp_handlers.handle_start_message(chat_id, config)
+                            greeting_response = await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
                             personalized_greeting = f"Здравствуйте, {sender_name}! Снова рад вас видеть. 😊\n\n{greeting_response}"
 
                             client = GreenAPIClient(tenant_config)
@@ -418,13 +462,10 @@ async def handle_incoming_message(
             logger.error(f"❌ Invalid tenant config for {tenant_slug}")
             return
 
-        # Получаем конфигурацию
-        config = tenant_config.config
-
         # ====================================================================
         # УНИФИЦИРОВАННЫЙ РОУТИНГ: ДИНАМИЧЕСКОЕ ПЕРЕКЛЮЧЕНИЕ AI/IVR
         # ====================================================================
-        enable_ai = config.bot.enable_dialog_mode
+        enable_ai = tenant_config.enable_dialog_mode
 
         logger.debug(f"[ROUTING] tenant={tenant_slug} enable_dialog_mode={enable_ai}")
         logger.info(f"🔀 [ROUTING] {tenant_slug}: {'AI mode' if enable_ai else 'IVR mode'}")
@@ -446,12 +487,12 @@ async def handle_incoming_message(
                 # Показываем IVR меню
                 if tenant_slug == "five_deluxe":
                     from ivr_handlers_5deluxe import handle_5deluxe_message
-                    response = await handle_5deluxe_message(chat_id, text_message, config, session, sender_name=sender_name)
+                    response = await handle_5deluxe_message(chat_id, text_message, tenant_config, session, sender_name=sender_name)
                 else:
-                    response = await whatsapp_handlers.handle_start_message(chat_id, config)
+                    response = await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
             else:
                 # Роутим через AI Assistant
-                response = await route_message_by_state(chat_id, text_message, config, tenant_slug, session)
+                response = await route_message_by_state(chat_id, text_message, tenant_config, tenant_slug, session)
 
         else:
             # ========== РЕЖИМ IVR ONLY ==========
@@ -460,10 +501,10 @@ async def handle_incoming_message(
             # Используем только IVR обработчики
             if tenant_slug == "five_deluxe":
                 from ivr_handlers_5deluxe import handle_5deluxe_message
-                response = await handle_5deluxe_message(chat_id, text_message, config, session, sender_name=sender_name)
+                response = await handle_5deluxe_message(chat_id, text_message, tenant_config, session, sender_name=sender_name)
             else:
                 # Для evopoliki создадим базовый IVR
-                response = await whatsapp_handlers.handle_start_message(chat_id, config)
+                response = await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
 
         # Отправляем ответ
         client = GreenAPIClient(tenant_config)
@@ -557,7 +598,7 @@ def is_ivr_command(text: str, state: WhatsAppState) -> bool:
 async def route_message_by_state(
     chat_id: str,
     text: str,
-    config: Config,
+    tenant_config: TenantConfig,
     tenant_slug: str,
     session: AsyncSession
 ) -> str:
@@ -572,8 +613,9 @@ async def route_message_by_state(
     Args:
         chat_id: ID чата WhatsApp
         text: Текст сообщения
-        config: Конфигурация tenant
+        tenant_config: Конфигурация tenant
         tenant_slug: Идентификатор tenant (для получения правильного AssistantManager)
+        session: Сессия БД
 
     Returns:
         Текст ответа для отправки пользователю
@@ -658,7 +700,7 @@ async def route_message_by_state(
                         logger.info(f"📋 Запуск поиска лекал: {brand} {model}")
 
                         # Сохраняем данные в состояние
-                        category_name = get_category_name(category, config.bot.i18n)
+                        category_name = get_category_name(category, tenant_config.i18n)
                         logger.info(f"🏷️  [CATEGORY_FIX] category={category} -> category_name={category_name}")
 
                         update_user_data(chat_id, {
@@ -674,14 +716,14 @@ async def route_message_by_state(
                         # Запускаем поиск лекал
                         logger.info(f"🚀 [FSM_START] Запуск поиска лекал для {brand} {model} (category: {category})")
                         return await whatsapp_handlers.search_patterns_for_model(
-                            chat_id, model, brand, category, config, session
+                            chat_id, model, brand, category, tenant_config, session
                         )
 
                     elif brand:
                         # Есть только марка - показываем модели
                         logger.info(f"📋 Показываем модели для марки: {brand}")
 
-                        category_name = get_category_name(category, config.bot.i18n)
+                        category_name = get_category_name(category, tenant_config.i18n)
                         logger.info(f"🏷️  [CATEGORY_FIX] category={category} -> category_name={category_name}")
 
                         update_user_data(chat_id, {
@@ -692,12 +734,12 @@ async def route_message_by_state(
 
                         set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
 
-                        return await whatsapp_handlers.show_models_page(chat_id, 1, brand, config, session)
+                        return await whatsapp_handlers.show_models_page(chat_id, 1, brand, tenant_config, session)
 
                     else:
                         # Намерение заказа есть, но данных недостаточно - показываем меню
                         logger.info("⚠️ Намерение заказа без марки/модели - показываем меню")
-                        return await whatsapp_handlers.handle_start_message(chat_id, config)
+                        return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
 
             else:
                 # Текстовый ответ (FAQ) - форматируем для WhatsApp и отправляем
@@ -709,13 +751,13 @@ async def route_message_by_state(
             logger.error(f"❌ Ошибка при обращении к Ассистенту: {e}")
 
             # Fallback: показываем главное меню
-            return await whatsapp_handlers.handle_start_message(chat_id, config)
+            return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
 
     # Главное меню - проверяем, является ли это IVR-командой
     elif current_state == WhatsAppState.MAIN_MENU:
         if is_ivr_command(text, current_state):
             # Ожидаемая цифра 1-5 - обрабатываем через IVR
-            return await whatsapp_handlers.handle_main_menu_choice(chat_id, text, config, session)
+            return await whatsapp_handlers.handle_main_menu_choice(chat_id, text, tenant_config, session)
         else:
             # Свободный текст (например, "кто ты?", "какая гарантия?") - передаем в AI
             logger.info(f"🤖 Main menu: unexpected text '{text}' - routing to AI Assistant")
@@ -756,7 +798,7 @@ async def route_message_by_state(
                         logger.info(f"📋 Запуск поиска лекал: {brand} {model}")
 
                         # Сохраняем данные в состояние
-                        category_name = get_category_name(category, config.bot.i18n)
+                        category_name = get_category_name(category, tenant_config.i18n)
                         logger.info(f"🏷️  [CATEGORY_FIX] category={category} -> category_name={category_name}")
 
                         update_user_data(chat_id, {
@@ -771,14 +813,14 @@ async def route_message_by_state(
 
                         # Запускаем поиск лекал
                         return await whatsapp_handlers.search_patterns_for_model(
-                            chat_id, model, brand, category, config, session
+                            chat_id, model, brand, category, tenant_config, session
                         )
 
                     elif brand:
                         # Есть только марка - показываем модели
                         logger.info(f"📋 Показываем модели для марки: {brand}")
 
-                        category_name = get_category_name(category, config.bot.i18n)
+                        category_name = get_category_name(category, tenant_config.i18n)
                         logger.info(f"🏷️  [CATEGORY_FIX] category={category} -> category_name={category_name}")
 
                         update_user_data(chat_id, {
@@ -789,12 +831,12 @@ async def route_message_by_state(
 
                         set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
 
-                        return await whatsapp_handlers.show_models_page(chat_id, 1, brand, config, session)
+                        return await whatsapp_handlers.show_models_page(chat_id, 1, brand, tenant_config, session)
 
                     else:
                         # Намерение заказа есть, но данных недостаточно - показываем меню
                         logger.info("⚠️ Намерение заказа без марки/модели - показываем меню")
-                        return await whatsapp_handlers.handle_start_message(chat_id, config)
+                        return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
 
                 else:
                     # Текстовый ответ (FAQ) - форматируем для WhatsApp и отправляем
@@ -806,7 +848,7 @@ async def route_message_by_state(
                 logger.error(f"❌ Ошибка при обращении к Ассистенту: {e}")
 
                 # Fallback: показываем главное меню
-                return await whatsapp_handlers.handle_start_message(chat_id, config)
+                return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
 
     # EVA-коврики: ожидание марки
     elif current_state == WhatsAppState.EVA_WAITING_BRAND:
@@ -819,15 +861,15 @@ async def route_message_by_state(
                 suggested_brand = user_data["suggested_brand"]
                 # Очищаем suggestion из user_data
                 update_user_data(chat_id, {"suggested_brand": None})
-                return await whatsapp_handlers.handle_eva_brand_input(chat_id, suggested_brand, config, session)
+                return await whatsapp_handlers.handle_eva_brand_input(chat_id, suggested_brand, tenant_config, session)
             else:
                 # Очищаем suggestion и показываем текущую страницу заново
                 update_user_data(chat_id, {"suggested_brand": None})
                 current_page = user_data.get("brands_page", 1)
-                return await whatsapp_handlers.show_brands_page(chat_id, current_page, config, session)
+                return await whatsapp_handlers.show_brands_page(chat_id, current_page, tenant_config, session)
         else:
             # Обычный ввод марки
-            return await whatsapp_handlers.handle_eva_brand_input(chat_id, text, config, session)
+            return await whatsapp_handlers.handle_eva_brand_input(chat_id, text, tenant_config, session)
 
     # EVA-коврики: ожидание модели
     elif current_state == WhatsAppState.EVA_WAITING_MODEL:
@@ -840,43 +882,43 @@ async def route_message_by_state(
                 suggested_model = user_data["suggested_model"]
                 # Очищаем suggestion из user_data
                 update_user_data(chat_id, {"suggested_model": None})
-                return await whatsapp_handlers.handle_eva_model_input(chat_id, suggested_model, config, session)
+                return await whatsapp_handlers.handle_eva_model_input(chat_id, suggested_model, tenant_config, session)
             else:
                 # Очищаем suggestion и показываем текущую страницу заново
                 update_user_data(chat_id, {"suggested_model": None})
                 brand_name = user_data.get("brand_name", "")
                 current_page = user_data.get("models_page", 1)
-                return await whatsapp_handlers.show_models_page(chat_id, current_page, brand_name, config, session)
+                return await whatsapp_handlers.show_models_page(chat_id, current_page, brand_name, tenant_config, session)
         else:
             # Обычный ввод модели
-            return await whatsapp_handlers.handle_eva_model_input(chat_id, text, config, session)
+            return await whatsapp_handlers.handle_eva_model_input(chat_id, text, tenant_config, session)
 
     # EVA-коврики: выбор опций (С бортами / Без бортов)
     elif current_state == WhatsAppState.EVA_SELECTING_OPTIONS:
-        return await whatsapp_handlers.handle_option_selection(chat_id, text, config, session)
+        return await whatsapp_handlers.handle_option_selection(chat_id, text, tenant_config, session)
 
     # EVA-коврики: подтверждение заказа
     elif current_state == WhatsAppState.EVA_CONFIRMING_ORDER:
         logger.info(f"🎯 [ROUTE] EVA_CONFIRMING_ORDER state - calling handle_order_confirmation with text: '{text}'")
-        return await whatsapp_handlers.handle_order_confirmation(chat_id, text, config)
+        return await whatsapp_handlers.handle_order_confirmation(chat_id, text, tenant_config)
 
     # Сбор контактов: ожидание имени
     elif current_state == WhatsAppState.WAITING_FOR_NAME:
-        return await whatsapp_handlers.handle_name_input(chat_id, text, config, session)  # ✅ Передаём session!
+        return await whatsapp_handlers.handle_name_input(chat_id, text, tenant_config, session)  # ✅ Передаём session!
 
     # Сбор контактов: ожидание телефона
     elif current_state == WhatsAppState.WAITING_FOR_PHONE:
-        return await whatsapp_handlers.handle_phone_input(chat_id, text, config)
+        return await whatsapp_handlers.handle_phone_input(chat_id, text, tenant_config)
 
     # Связь с менеджером
     elif current_state == WhatsAppState.CONTACT_MANAGER:
         # Возвращаем в меню
-        return await whatsapp_handlers.handle_start_message(chat_id, config)
+        return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
 
     # Неизвестное состояние - сбрасываем в главное меню
     else:
         logger.warning(f"Unknown state: {current_state}, resetting to main menu")
-        return await whatsapp_handlers.handle_start_message(chat_id, config)
+        return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
 
 
 # ============================================================================
