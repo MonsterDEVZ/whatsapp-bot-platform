@@ -1079,8 +1079,8 @@ async def send_callback_request_to_airtable(config: Config, user_data: dict, cli
 
 async def handle_name_input(chat_id: str, name: str, config: Config, session) -> str:
     """
-    Обрабатывает ввод имени клиента.
-    Для WhatsApp автоматически извлекает номер телефона из chatId.
+    Обрабатывает ввод имени клиента, автоматически извлекает телефон,
+    сохраняет лид в Airtable и завершает воронку.
 
     Args:
         chat_id: ID чата WhatsApp
@@ -1091,105 +1091,101 @@ async def handle_name_input(chat_id: str, name: str, config: Config, session) ->
     Returns:
         Текст ответа
     """
-    logger.info(f"🎯 [HANDLE_NAME_INPUT] ===== НАЧАЛО ОБРАБОТКИ ИМЕНИ =====")
-    logger.info(f"🎯 [HANDLE_NAME_INPUT] Chat ID: {chat_id}")
+    logger.info(f"🎯 [HANDLE_NAME_INPUT] ===== НАЧАЛО ОБРАБОТКИ ИМЕНИ для {chat_id} =====")
     logger.info(f"🎯 [HANDLE_NAME_INPUT] Введённое имя: {name}")
 
-    # Сохраняем имя
-    update_user_data(chat_id, {"client_name": name.strip()})
-    logger.info(f"✅ [HANDLE_NAME_INPUT] Имя сохранено в user_data")
-
-    # ОПТИМИЗАЦИЯ ДЛЯ WHATSAPP:
-    # Извлекаем номер телефона из chatId (например, "996777510804@c.us" -> "+996777510804")
-    phone_number = extract_phone_from_chat_id(chat_id)
-    logger.info(f"📱 [HANDLE_NAME_INPUT] Извлечённый телефон: {phone_number}")
-
-    update_user_data(chat_id, {"client_phone": phone_number})
-    logger.info(f"✅ [HANDLE_NAME_INPUT] Телефон сохранён в user_data")
-
-    # Получаем все данные для заявки
+    # 1. Получаем все данные, собранные в воронке
     user_data = get_user_data(chat_id)
-    logger.info(f"📋 [HANDLE_NAME_INPUT] Все данные пользователя: {user_data}")
+    if not user_data:
+        logger.error(f"❌ [HANDLE_NAME_INPUT] Не найдены данные сессии для {chat_id}")
+        return "Произошла ошибка, попробуйте начать сначала, отправив команду 'Меню'."
 
-    # Проверяем тип заявки
-    request_type = user_data.get("request_type", "order")
-    logger.info(f"🔍 [HANDLE_NAME_INPUT] Тип заявки: {request_type}")
+    logger.info(f"📋 [HANDLE_NAME_INPUT] Данные сессии: {user_data}")
 
-    # Сохраняем заявку в Airtable через новый airtable_manager
-    try:
-        logger.info(f"📤 [HANDLE_NAME_INPUT] ===== ПОДГОТОВКА К ОТПРАВКЕ В AIRTABLE =====")
-        logger.info(f"📤 [HANDLE_NAME_INPUT] Клиент: {name.strip()}")
-        logger.info(f"📤 [HANDLE_NAME_INPUT] Телефон: {phone_number}")
-        logger.info(f"📤 [HANDLE_NAME_INPUT] Tenant: {config.bot.tenant_slug}")
-        logger.info(f"📤 [HANDLE_NAME_INPUT] Тип заявки: {request_type}")
+    # 2. Автоматически извлекаем номер телефона из chat_id
+    phone = extract_phone_from_chat_id(chat_id)
+    logger.info(f"📞 [HANDLE_NAME_INPUT] Автоматически извлечен номер: {phone}")
 
-        # Собираем данные для отправки в Airtable
-        lead_data = {
-            "name": name.strip(),
-            "phone": phone_number,
-            "username": chat_id,  # В WhatsApp chat_id — это и есть уникальный идентификатор
-        }
+    # 3. Формируем полный объект лида для Airtable
+    lead_data = {
+        "name": name.strip(),
+        "phone": phone,
+        "username": chat_id,  # WhatsApp chat_id как username
+    }
 
-        # Добавляем данные о товаре и автомобиле (если есть)
-        if "selected_category" in user_data:
-            lead_data["category"] = user_data["selected_category"]
-            logger.info(f"📤 [HANDLE_NAME_INPUT] Категория: {user_data['selected_category']}")
+    # Добавляем данные о товаре и автомобиле (если есть)
+    if "selected_category" in user_data:
+        lead_data["category"] = user_data["selected_category"]
+        logger.info(f"📦 [HANDLE_NAME_INPUT] Категория: {user_data['selected_category']}")
 
-        if "selected_brand" in user_data:
-            lead_data["car_brand"] = user_data["selected_brand"]
-            logger.info(f"📤 [HANDLE_NAME_INPUT] Марка: {user_data['selected_brand']}")
+    if "selected_brand" in user_data:
+        lead_data["car_brand"] = user_data["selected_brand"]
+        logger.info(f"🚗 [HANDLE_NAME_INPUT] Марка: {user_data['selected_brand']}")
 
-        if "selected_model" in user_data:
-            lead_data["car_model"] = user_data["selected_model"]
-            logger.info(f"📤 [HANDLE_NAME_INPUT] Модель: {user_data['selected_model']}")
+    if "selected_model" in user_data:
+        lead_data["car_model"] = user_data["selected_model"]
+        logger.info(f"🚗 [HANDLE_NAME_INPUT] Модель: {user_data['selected_model']}")
 
-        # Добавляем опции (если есть)
-        if "selected_options" in user_data:
-            options_list = user_data["selected_options"]
-            if isinstance(options_list, list):
-                lead_data["options"] = ", ".join(options_list)
-            else:
-                lead_data["options"] = str(options_list)
-            logger.info(f"📤 [HANDLE_NAME_INPUT] Опции: {lead_data['options']}")
-
-        # Добавляем цену (если есть)
-        if "total_price" in user_data and user_data["total_price"]:
-            lead_data["price"] = user_data["total_price"]
-            logger.info(f"📤 [HANDLE_NAME_INPUT] Цена: {user_data['total_price']} сом")
-
-        # Отправляем в Airtable
-        logger.info(f"🚀 [HANDLE_NAME_INPUT] Вызов create_lead...")
-        record_id = await create_lead(lead_data, tenant_slug=config.bot.tenant_slug)
-
-        if record_id:
-            logger.info(f"✅ [HANDLE_NAME_INPUT] ===== ЗАЯВКА УСПЕШНО СОХРАНЕНА В AIRTABLE =====")
-            logger.info(f"✅ [HANDLE_NAME_INPUT] Record ID: {record_id}")
+    # Добавляем опции (если есть)
+    if "selected_options" in user_data:
+        options_list = user_data["selected_options"]
+        if isinstance(options_list, list):
+            lead_data["options"] = ", ".join(options_list)
         else:
-            logger.error("❌ [HANDLE_NAME_INPUT] ===== НЕ УДАЛОСЬ СОХРАНИТЬ ЗАЯВКУ В AIRTABLE =====")
-            logger.error(f"❌ [HANDLE_NAME_INPUT] create_lead вернул None")
+            lead_data["options"] = str(options_list)
+        logger.info(f"⚙️ [HANDLE_NAME_INPUT] Опции: {lead_data['options']}")
 
+    # Добавляем цену (если есть)
+    if "total_price" in user_data and user_data["total_price"]:
+        lead_data["price"] = user_data["total_price"]
+        logger.info(f"💰 [HANDLE_NAME_INPUT] Цена: {user_data['total_price']} сом")
+
+    logger.info(f"📤 [HANDLE_NAME_INPUT] ===== ПОДГОТОВКА К ОТПРАВКЕ В AIRTABLE =====")
+    logger.info(f"📤 [HANDLE_NAME_INPUT] Данные лида: {lead_data}")
+
+    # 4. Отправляем данные в Airtable
+    record_id = None
+    try:
+        logger.info(f"🚀 [HANDLE_NAME_INPUT] Вызов create_lead(tenant_slug={config.bot.tenant_slug})...")
+        record_id = await create_lead(lead_data, tenant_slug=config.bot.tenant_slug)
     except Exception as e:
-        logger.exception("!!! [HANDLE_NAME_INPUT] КРИТИЧЕСКАЯ ОШИБКА СОХРАНЕНИЯ ЗАЯВКИ В AIRTABLE !!!")
+        logger.exception("!!! [HANDLE_NAME_INPUT] КРИТИЧЕСКАЯ ОШИБКА ПРИ ВЫЗОВЕ create_lead !!!")
         logger.error(f"❌ [HANDLE_NAME_INPUT] Тип ошибки: {type(e).__name__}")
         logger.error(f"❌ [HANDLE_NAME_INPUT] Сообщение: {str(e)}")
-        logger.error(f"❌ [HANDLE_NAME_INPUT] Трейсбек выше ^^^")
 
-    # Очищаем состояние
-    clear_state(chat_id)
+    # 5. Реагируем на результат
+    if record_id:
+        logger.info("="*70)
+        logger.info(f"✅ [HANDLE_NAME_INPUT] Заявка успешно сохранена в Airtable с ID: {record_id}")
+        logger.info("="*70)
 
-    # Очищаем историю диалога в DialogMemory после успешного завершения заказа
-    try:
-        memory = get_memory()
-        memory.clear_history(chat_id)
-        logger.info(f"🗑️ [MEMORY] Очищена история диалога для {chat_id} после завершения заказа")
-    except Exception as e:
-        logger.warning(f"⚠️ [MEMORY] Не удалось очистить историю: {e}")
+        # Очищаем состояние только после успешного сохранения
+        clear_state(chat_id)
+        logger.info(f"🗑️ [HANDLE_NAME_INPUT] Состояние очищено для {chat_id}")
 
-    # Финальное сообщение
-    return (
-        f"✅ Спасибо, {name}!\n\n"
-        f"Мы получили ваши данные и скоро свяжемся с вами "
-        f"для подтверждения заказа.\n\n"
-        f"Обычно это занимает 5-10 минут. 😊\n\n"
-        f"Отправьте \"Меню\" для возврата в главное меню."
-    )
+        # Очищаем историю диалога
+        try:
+            memory = get_memory()
+            memory.clear_history(chat_id)
+            logger.info(f"🗑️ [MEMORY] Очищена история диалога для {chat_id}")
+        except Exception as e:
+            logger.warning(f"⚠️ [MEMORY] Не удалось очистить историю: {e}")
+
+        # Сообщение об успехе
+        return (
+            f"✅ Спасибо, {name.strip()}! 🙏\n\n"
+            f"Мы получили ваши данные и скоро свяжемся с вами по номеру +{phone} "
+            f"для подтверждения заказа.\n\n"
+            f"Обычно это занимает 5-10 минут. ⏱️\n\n"
+            f"Отправьте \"Меню\" для возврата в главное меню."
+        )
+    else:
+        logger.error("❌ [HANDLE_NAME_INPUT] ===== НЕ УДАЛОСЬ СОХРАНИТЬ ЗАЯВКУ В AIRTABLE =====")
+        logger.error(f"❌ [HANDLE_NAME_INPUT] create_lead вернул None")
+
+        # Сообщение об ошибке
+        return (
+            f"К сожалению, {name.strip()}, при оформлении заявки произошла техническая ошибка. 😔\n\n"
+            f"Пожалуйста, попробуйте позже или свяжитесь с нашим менеджером напрямую.\n\n"
+            f"Отправьте \"Меню\" для возврата в главное меню."
+        )
