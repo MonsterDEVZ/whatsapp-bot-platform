@@ -877,7 +877,7 @@ async def route_message_by_state(
                 # ============================================================
                 # СЦЕНАРИЙ: ORDER (AI как умный маршрутизатор в воронку)
                 # ============================================================
-                elif intent == "ORDER" or "category" in parsed_data:
+                elif intent == "ORDER":
                     logger.info(f"🛒 [AI_ROUTER] Обнаружен JSON с намерением ORDER")
 
                     order_data = extract_order_data(parsed_data)
