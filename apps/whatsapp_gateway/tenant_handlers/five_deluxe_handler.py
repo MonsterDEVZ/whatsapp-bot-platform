@@ -27,12 +27,11 @@ async def handle_5deluxe_menu(chat_id: str, tenant_config, sender_name: str = "�
     """
     logger.info(f"🏢 [FIVE_DELUXE] Generating menu for {sender_name} ({chat_id})")
 
-    # Категории товаров для Five Deluxe
+    # Категории товаров для Five Deluxe (утвержденный макет)
     categories = [
-        {"id": "category:5d_mats", "title": "💎 Премиальные 5D-коврики"},
-        {"id": "category:prestige_covers", "title": "💺 Чехлы из экокожи \"Prestige\""},
-        {"id": "category:trunk_organizers", "title": "📦 Органайзеры в багажник"},
-        {"id": "category:dashboard_covers", "title": "🎯 Накидки на панель из алькантары"},
+        {"id": "category:5d_deluxe", "title": "💎 5D-коврики Deluxe"},
+        {"id": "category:premium_covers", "title": "👑 Премиум-чехлы"},
+        {"id": "category:alcantara_covers", "title": "✨ Накидки из алькантары"},
         {"id": "action:contact_manager", "title": "📞 Связаться с менеджером"}
     ]
 
@@ -48,7 +47,7 @@ async def handle_5deluxe_menu(chat_id: str, tenant_config, sender_name: str = "�
         })
 
     sections.append({
-        "title": "🌟 Наши премиальные товары",
+        "title": "",  # Убираем заголовок секции для чистого вида
         "rows": catalog_rows
     })
 
@@ -56,9 +55,9 @@ async def handle_5deluxe_menu(chat_id: str, tenant_config, sender_name: str = "�
 
     return {
         "type": "interactive_list",
-        "header": f"Привет, {sender_name}! 👋",
+        "header": f"*Привет, {sender_name}! 👋*",
         "body": "Добро пожаловать в Five Deluxe! Выберите раздел из меню:",
-        "footer": "FIVE DELUXE - Премиальные аксессуары для вашего автомобиля",
+        "footer": "",  # Убираем footer для чистого вида
         "button_text": "📋 Открыть меню",
         "sections": sections
     }
