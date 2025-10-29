@@ -37,7 +37,7 @@ from packages.core.db.queries import (
 )
 from packages.core.memory import get_memory
 
-from state_manager import (
+from .state_manager import (
     WhatsAppState,
     get_state,
     set_state,
