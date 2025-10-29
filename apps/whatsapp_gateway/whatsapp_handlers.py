@@ -85,7 +85,7 @@ async def handle_start_message(chat_id: str, config: Config) -> str:
     Returns:
         Текст ответа
     """
-    i18n = config.bot.i18n
+    i18n = config.i18n
 
     # Устанавливаем состояние главного меню
     set_state(chat_id, WhatsAppState.MAIN_MENU)
@@ -150,9 +150,9 @@ async def handle_main_menu_choice(
     Returns:
         Текст ответа
     """
-    i18n = config.bot.i18n
+    i18n = config.i18n
 
-    logger.info(f"🎯 [MENU_CHOICE] Tenant: {config.bot.tenant_slug}, Choice: {choice}")
+    logger.info(f"🎯 [MENU_CHOICE] Tenant: {config.tenant_slug}, Choice: {choice}")
 
     # ═══════════════════════════════════════════════════════════════
     # КРИТИЧНО: Получаем catalog_categories ДИНАМИЧЕСКИ!
@@ -245,7 +245,7 @@ async def show_brands_page(
     brands_list = user_data.get("all_brands")
 
     if not brands_list:
-        tenant = await get_tenant_by_slug(session, config.bot.tenant_slug)
+        tenant = await get_tenant_by_slug(session, config.tenant_slug)
 
         if not tenant:
             return "❌ Ошибка конфигурации. Попробуйте позже."
@@ -316,7 +316,7 @@ async def show_models_page(
     Returns:
         Текст с списком моделей и командами навигации
     """
-    tenant = await get_tenant_by_slug(session, config.bot.tenant_slug)
+    tenant = await get_tenant_by_slug(session, config.tenant_slug)
 
     if not tenant:
         return "❌ Ошибка конфигурации. Попробуйте позже."
@@ -611,7 +611,7 @@ async def search_patterns_for_model(
     # Сохраняем модель
     update_user_data(chat_id, {"model_name": model_name.strip()})
 
-    tenant = await get_tenant_by_slug(session, config.bot.tenant_slug)
+    tenant = await get_tenant_by_slug(session, config.tenant_slug)
 
     if not tenant:
         clear_state(chat_id)
@@ -795,7 +795,7 @@ async def handle_option_selection(
             f"📝 Шаг 1/2: Введите ваше имя"
         )
 
-    tenant = await get_tenant_by_slug(session, config.bot.tenant_slug)
+    tenant = await get_tenant_by_slug(session, config.tenant_slug)
 
     if not tenant:
         return "❌ Ошибка конфигурации. Попробуйте позже."
@@ -832,7 +832,7 @@ async def handle_option_selection(
     set_state(chat_id, WhatsAppState.EVA_CONFIRMING_ORDER)
 
     # Проверяем флаг show_price_in_summary
-    show_price = config.bot.i18n.get("company.show_price_in_summary", True)  # По умолчанию true для обратной совместимости
+    show_price = config.i18n.get("company.show_price_in_summary", True)  # По умолчанию true для обратной совместимости
     logger.info(f"💰 [ORDER_SUMMARY] show_price_in_summary={show_price}")
 
     # Формируем сводку с условным показом цены
@@ -916,12 +916,12 @@ async def send_whatsapp_order_to_airtable(config: Config, user_data: dict, clien
     """
     try:
         logger.info(f"🔍 [SEND_TO_AIRTABLE] === НАЧАЛО СОХРАНЕНИЯ ЗАЯВКИ ===")
-        logger.info(f"🔍 [SEND_TO_AIRTABLE] Tenant: {config.bot.tenant_slug}")
+        logger.info(f"🔍 [SEND_TO_AIRTABLE] Tenant: {config.tenant_slug}")
         logger.info(f"🔍 [SEND_TO_AIRTABLE] Клиент: {client_name} (WhatsApp: {chat_id})")
 
         # Проверяем конфигурацию Airtable
         if not config.airtable:
-            logger.error(f"❌ [SEND_TO_AIRTABLE] Airtable не настроен для tenant={config.bot.tenant_slug}")
+            logger.error(f"❌ [SEND_TO_AIRTABLE] Airtable не настроен для tenant={config.tenant_slug}")
             return False
 
         # Импортируем необходимые модули
@@ -985,7 +985,7 @@ async def send_whatsapp_order_to_airtable(config: Config, user_data: dict, clien
 
     except Exception as e:
         logger.exception("!!! КРИТИЧЕСКАЯ ОШИБКА СОХРАНЕНИЯ В AIRTABLE !!!")
-        logger.error(f"❌ [SEND_TO_AIRTABLE] Tenant: {config.bot.tenant_slug}")
+        logger.error(f"❌ [SEND_TO_AIRTABLE] Tenant: {config.tenant_slug}")
         logger.error(f"❌ [SEND_TO_AIRTABLE] Тип ошибки: {type(e).__name__}")
         logger.error(f"❌ [SEND_TO_AIRTABLE] Сообщение: {str(e)}")
         logger.error(f"🔍 [SEND_TO_AIRTABLE] === КОНЕЦ СОХРАНЕНИЯ (FAILED) ===")
@@ -1009,12 +1009,12 @@ async def send_callback_request_to_airtable(config: Config, user_data: dict, cli
     """
     try:
         logger.info(f"🔍 [CALLBACK_AIRTABLE] === НАЧАЛО СОХРАНЕНИЯ CALLBACK REQUEST ===")
-        logger.info(f"🔍 [CALLBACK_AIRTABLE] Tenant: {config.bot.tenant_slug}")
+        logger.info(f"🔍 [CALLBACK_AIRTABLE] Tenant: {config.tenant_slug}")
         logger.info(f"🔍 [CALLBACK_AIRTABLE] Клиент: {client_name} (WhatsApp: {chat_id})")
 
         # Проверяем конфигурацию Airtable
         if not config.airtable:
-            logger.error(f"❌ [CALLBACK_AIRTABLE] Airtable не настроен для tenant={config.bot.tenant_slug}")
+            logger.error(f"❌ [CALLBACK_AIRTABLE] Airtable не настроен для tenant={config.tenant_slug}")
             return False
 
         # Извлекаем детали запроса
@@ -1046,7 +1046,7 @@ async def send_callback_request_to_airtable(config: Config, user_data: dict, cli
             "client_name": client_name,
             "client_phone": client_phone,
             "source": "WhatsApp",
-            "project": config.bot.tenant_slug.upper(),
+            "project": config.tenant_slug.upper(),
             "product": product_full_name,
             "details": details_text
         }
@@ -1069,7 +1069,7 @@ async def send_callback_request_to_airtable(config: Config, user_data: dict, cli
 
     except Exception as e:
         logger.exception("!!! КРИТИЧЕСКАЯ ОШИБКА СОХРАНЕНИЯ CALLBACK REQUEST В AIRTABLE !!!")
-        logger.error(f"❌ [CALLBACK_AIRTABLE] Tenant: {config.bot.tenant_slug}")
+        logger.error(f"❌ [CALLBACK_AIRTABLE] Tenant: {config.tenant_slug}")
         logger.error(f"❌ [CALLBACK_AIRTABLE] Тип ошибки: {type(e).__name__}")
         logger.error(f"❌ [CALLBACK_AIRTABLE] Сообщение: {str(e)}")
         logger.error(f"🔍 [CALLBACK_AIRTABLE] === КОНЕЦ СОХРАНЕНИЯ (FAILED) ===")

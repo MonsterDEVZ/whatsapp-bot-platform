@@ -243,7 +243,35 @@ class AssistantManager:
                 self.memory.add_message(chat_id, "assistant", response_to_save)
                 logger.debug(f"💾 Сохранен диалог в память для {chat_id}")
 
-            return clean_text if command_dict else response_text, command_dict
+            # ИСПРАВЛЕНИЕ: Возвращаем только строку (не кортеж!)
+            # command_dict больше не используется в WhatsApp Gateway
+            return clean_text if command_dict else response_text
+
+        except openai.NotFoundError as e:
+            # Обработка удаленного/невалидного thread_id
+            logger.warning(f"⚠️ Stale thread_id '{thread_id}' detected (404 Not Found)")
+            logger.warning(f"⚠️ OpenAI error: {e}")
+            logger.warning(f"🔄 Attempting to recover by creating new thread...")
+
+            # Удаляем невалидный thread из кеша
+            if chat_id:
+                from ..ai.assistant import clear_thread
+                clear_thread(chat_id)
+                logger.info(f"🗑️ Cleared stale thread_id from cache for chat_id: {chat_id}")
+
+            # Создаем новый thread
+            new_thread_id = self.create_thread()
+            logger.info(f"✅ Created new thread: {new_thread_id}")
+
+            # Сохраняем новый thread в кеше
+            if chat_id:
+                from ..ai.assistant import _user_threads
+                _user_threads[chat_id] = new_thread_id
+                logger.info(f"💾 Saved new thread_id to cache for chat_id: {chat_id}")
+
+            # Повторяем запрос с новым thread_id (рекурсивный вызов, но только один раз)
+            logger.info(f"🔄 Retrying request with new thread_id: {new_thread_id}")
+            return await self.get_response(new_thread_id, user_message, chat_id, timeout)
 
         except TimeoutError:
             raise

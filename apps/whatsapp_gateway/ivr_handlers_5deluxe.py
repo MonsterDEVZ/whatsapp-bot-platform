@@ -98,7 +98,7 @@ async def handle_5deluxe_message(
         # Проверка прав администратора (по номеру телефона в chat_id)
         # Формат chat_id: "996XXXXXXXXX@c.us"
         phone_number = chat_id.split("@")[0] if "@" in chat_id else chat_id
-        admin_phones = [str(admin_id) for admin_id in config.bot.admin_ids]
+        admin_phones = [str(admin_id) for admin_id in []]
         
         if phone_number not in admin_phones:
             logger.warning(f"[RESET] Unauthorized access attempt from {chat_id}")
@@ -172,7 +172,7 @@ async def show_main_menu(chat_id: str, config: Config, is_first_contact: bool = 
     Returns:
         str: Текст главного меню
     """
-    i18n = config.bot.i18n
+    i18n = config.i18n
     set_state(chat_id, WhatsAppState.MAIN_MENU)
 
     # Выбираем правильный текст
@@ -207,7 +207,7 @@ async def handle_main_menu_input(
     Returns:
         str: Текст ответа
     """
-    i18n = config.bot.i18n
+    i18n = config.i18n
     _, callback_mapping = get_whatsapp_main_menu(i18n)
 
     if text not in callback_mapping:
@@ -250,7 +250,7 @@ async def start_category_flow(
     Returns:
         str: Текст с предложением выбрать марку
     """
-    i18n = config.bot.i18n
+    i18n = config.i18n
 
     # Сохраняем категорию
     category_names = {
@@ -267,7 +267,7 @@ async def start_category_flow(
         "category_name": category_name
     })
 
-    tenant = await get_tenant_by_slug(session, config.bot.tenant_slug)
+    tenant = await get_tenant_by_slug(session, config.tenant_slug)
 
     if not tenant:
         return "Ошибка конфигурации. Попробуйте позже."
@@ -294,7 +294,7 @@ async def show_brands_page(chat_id: str, page: int, brands_list: list, config: C
     Returns:
         str: Текст с пагинированным списком марок
     """
-    i18n = config.bot.i18n
+    i18n = config.i18n
 
     # Пагинация
     total_brands = len(brands_list)
@@ -347,7 +347,7 @@ async def handle_jump_with_model(
     logger.info(f"[🚀 JUMP] Processing jump: {brand_name} + {model_input}")
     
     # Получаем список моделей для данной марки
-    tenant = await get_tenant_by_slug(session, config.bot.tenant_slug)
+    tenant = await get_tenant_by_slug(session, config.tenant_slug)
     if not tenant:
         return "Ошибка конфигурации. Попробуйте позже."
     
@@ -423,7 +423,7 @@ async def handle_brand_selection(
     Returns:
         str: Текст ответа
     """
-    i18n = config.bot.i18n
+    i18n = config.i18n
     user_data = get_user_data(chat_id)
     callback_mapping = user_data.get("brands_callback_mapping", {})
     brands_list = user_data.get("brands_list", [])
@@ -547,12 +547,12 @@ async def process_brand(
     Returns:
         str: Текст с моделями
     """
-    i18n = config.bot.i18n
+    i18n = config.i18n
 
     # Сохраняем марку
     update_user_data(chat_id, {"brand_name": brand_name})
 
-    tenant = await get_tenant_by_slug(session, config.bot.tenant_slug)
+    tenant = await get_tenant_by_slug(session, config.tenant_slug)
 
     if not tenant:
         return "Ошибка конфигурации. Попробуйте позже."
@@ -592,7 +592,7 @@ async def show_models_page(chat_id: str, page: int, models_list: list, brand_nam
     Returns:
         str: Текст с пагинированным списком моделей
     """
-    i18n = config.bot.i18n
+    i18n = config.i18n
 
     # Пагинация
     total_models = len(models_list)
@@ -636,7 +636,7 @@ async def handle_model_selection(
     Returns:
         str: Текст ответа
     """
-    i18n = config.bot.i18n
+    i18n = config.i18n
     user_data = get_user_data(chat_id)
     callback_mapping = user_data.get("models_callback_mapping", {})
     models_list = user_data.get("models_list", [])
@@ -731,7 +731,7 @@ async def process_model(
     Returns:
         str: Текст с результатами поиска
     """
-    i18n = config.bot.i18n
+    i18n = config.i18n
     user_data = get_user_data(chat_id)
     brand_name = user_data.get("brand_name", "")
     category = user_data.get("category", "5d_mats")
@@ -739,7 +739,7 @@ async def process_model(
     # Сохраняем модель
     update_user_data(chat_id, {"model_name": model_name})
 
-    tenant = await get_tenant_by_slug(session, config.bot.tenant_slug)
+    tenant = await get_tenant_by_slug(session, config.tenant_slug)
 
     if not tenant:
         return "Ошибка конфигурации. Попробуйте позже."
@@ -773,7 +773,7 @@ async def show_options_menu(chat_id: str, config: Config, patterns_found: bool =
     Returns:
         str: Текст с опциями
     """
-    i18n = config.bot.i18n
+    i18n = config.i18n
     user_data = get_user_data(chat_id)
     category = user_data.get("category", "")
 
@@ -812,7 +812,7 @@ async def handle_options_selection(chat_id: str, text: str, config: Config) -> s
     Returns:
         str: Текст подтверждения заказа
     """
-    i18n = config.bot.i18n
+    i18n = config.i18n
     user_data = get_user_data(chat_id)
     callback_mapping = user_data.get("options_callback_mapping", {})
 
@@ -855,7 +855,7 @@ async def show_order_confirmation(chat_id: str, config: Config) -> str:
     Returns:
         str: Текст подтверждения
     """
-    i18n = config.bot.i18n
+    i18n = config.i18n
     user_data = get_user_data(chat_id)
 
     brand_name = user_data.get("brand_name", "")
@@ -890,7 +890,7 @@ async def handle_order_confirmation(chat_id: str, text: str, config: Config) -> 
     Returns:
         str: Текст с запросом контактов или возврат в меню
     """
-    i18n = config.bot.i18n
+    i18n = config.i18n
     user_data = get_user_data(chat_id)
     callback_mapping = user_data.get("confirmation_callback_mapping", {})
     
@@ -1015,7 +1015,7 @@ async def handle_contact_manager_request(chat_id: str, config: Config) -> str:
     Returns:
         str: Контактная информация
     """
-    i18n = config.bot.i18n
+    i18n = config.i18n
     text = i18n.get("info_sections.contacts.text")
 
     clear_state(chat_id)
@@ -1062,7 +1062,7 @@ async def handle_ask_ai_whatsapp(chat_id: str, text: str, config: Config) -> str
     phone_number = chat_id.split("@")[0] if "@" in chat_id else chat_id
     
     # Проверка прав администратора
-    admin_phones = [str(admin_id) for admin_id in config.bot.admin_ids]
+    admin_phones = [str(admin_id) for admin_id in []]
     
     if phone_number not in admin_phones:
         logger.warning(f"[AI_DEBUG_WA] Unauthorized access attempt from {chat_id}")

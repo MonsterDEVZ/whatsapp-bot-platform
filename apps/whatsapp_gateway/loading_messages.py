@@ -69,7 +69,7 @@ def get_whatsapp_credentials_from_config(config):
     """
     try:
         import os
-        tenant_slug = config.bot.tenant_slug
+        tenant_slug = config.tenant_slug
         tenant_prefix = tenant_slug.upper().replace("-", "_")
         
         instance_id = os.getenv(f"{tenant_prefix}_WHATSAPP_INSTANCE_ID")
