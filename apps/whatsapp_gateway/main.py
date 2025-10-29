@@ -42,7 +42,6 @@ for tenant_dir in ["telegram/evopoliki", "telegram/five_deluxe"]:
         logger.info(f".env file not found at {env_path}, using environment variables")
 
 from packages.core.config import Config
-from packages.core.db.connection import close_db, get_session
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession as SQLAsyncSession
 from sqlalchemy import text
 from packages.core.memory import init_memory, get_memory
@@ -141,6 +140,25 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+
+# ============================================================================
+# DATABASE SESSION DEPENDENCY
+# ============================================================================
+
+async def get_session():
+    """
+    Dependency для получения сессии БД.
+    Используется в FastAPI endpoints через Depends(get_session).
+    """
+    if db_session_factory is None:
+        raise RuntimeError(
+            "База данных не инициализирована. "
+            "Приложение еще не запущено."
+        )
+
+    async with db_session_factory() as session:
+        yield session
 
 
 # ============================================================================
