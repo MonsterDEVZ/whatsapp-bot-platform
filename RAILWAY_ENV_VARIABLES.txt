@@ -1,0 +1,90 @@
+# ==============================================================================
+# RAILWAY ENVIRONMENT VARIABLES - КОПИРУЙ ВСЕ В RAILWAY DASHBOARD
+# ==============================================================================
+#
+# Открой: https://railway.app → Твой проект → Variables → Raw Editor
+# Скопируй ВСЕ переменные ниже и вставь в Raw Editor
+#
+# ВАЖНО: После вставки нажми "Deploy" - Railway перезапустит сервис!
+#
+# ==============================================================================
+
+# ==============================================================================
+# DATABASE (Railway PostgreSQL)
+# ==============================================================================
+
+DB_HOST=gondola.proxy.rlwy.net
+DB_PORT=54660
+DB_NAME=railway
+DB_USER=postgres
+DB_PASSWORD=***********************************
+
+# ==============================================================================
+# TENANT 1: EVOPOLIKI (ОБНОВЛЕН - новый instance 7107363948)
+# ==============================================================================
+
+EVOPOLIKI_BOT_TOKEN=0000000000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+# WhatsApp (GreenAPI) - НОВЫЙ INSTANCE ✅
+EVOPOLIKI_WHATSAPP_INSTANCE_ID=7107363948
+EVOPOLIKI_WHATSAPP_API_TOKEN=***************************************************
+EVOPOLIKI_WHATSAPP_PHONE_NUMBER=+996507988088
+EVOPOLIKI_WHATSAPP_API_URL=https://7107.api.green-api.com
+
+# AI Configuration
+EVOPOLIKI_ENABLE_DIALOG_MODE=True
+EVOPOLIKI_OPENAI_API_KEY=sk-proj-************************************************
+EVOPOLIKI_OPENAI_ASSISTANT_ID=asst_2BtVGCAEd5UjG4IK3DmVqRcF
+
+# Airtable
+EVOPOLIKI_AIRTABLE_API_TOKEN=pat*******************************************
+EVOPOLIKI_AIRTABLE_BASE_ID=appVkpLFJbf0APDj5
+EVOPOLIKI_AIRTABLE_TABLE_ID=tblUV3a6NRB0azN22
+
+# ==============================================================================
+# TENANT 2: FIVE_DELUXE
+# ==============================================================================
+
+FIVE_DELUXE_BOT_TOKEN=0000000000:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+
+# WhatsApp (GreenAPI)
+FIVE_DELUXE_WHATSAPP_INSTANCE_ID=7107352135
+FIVE_DELUXE_WHATSAPP_API_TOKEN=***************************************************
+FIVE_DELUXE_WHATSAPP_PHONE_NUMBER=+996709460702
+FIVE_DELUXE_WHATSAPP_API_URL=https://7107.api.green-api.com
+
+# AI Configuration
+FIVE_DELUXE_ENABLE_DIALOG_MODE=True
+FIVE_DELUXE_OPENAI_API_KEY=sk-proj-************************************************
+FIVE_DELUXE_OPENAI_ASSISTANT_ID=asst_uJkAR9WKCGct6rraFE1ULRTW
+
+# Airtable
+FIVE_DELUXE_AIRTABLE_API_TOKEN=pat*******************************************
+FIVE_DELUXE_AIRTABLE_BASE_ID=app1X2TpPVukeswtK
+FIVE_DELUXE_AIRTABLE_TABLE_ID=tblUV3a6NRB0azN22
+
+# ==============================================================================
+# SERVER CONFIGURATION
+# ==============================================================================
+
+PORT=8000
+DEBUG=false
+
+# ==============================================================================
+# ИНСТРУКЦИЯ ПО ПРИМЕНЕНИЮ
+# ==============================================================================
+#
+# 1. Открой Railway Dashboard: https://railway.app
+# 2. Выбери проект "whatsapp_platform" (или как у тебя называется)
+# 3. Перейди в Variables
+# 4. Нажми "Raw Editor"
+# 5. Скопируй ВСЕ переменные из этого файла (начиная с DB_HOST)
+# 6. Вставь в Raw Editor (заменит все существующие)
+# 7. Нажми "Deploy" или просто закрой окно - Railway автоматически перезапустится
+#
+# ВАЖНО:
+# - Через 30-60 секунд сервис перезапустится с новыми настройками
+# - Отправь сообщение боту в WhatsApp для проверки
+# - Бот должен ответить! ✅
+#
+# ==============================================================================

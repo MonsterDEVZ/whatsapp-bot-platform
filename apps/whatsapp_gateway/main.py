@@ -1460,8 +1460,10 @@ async def route_message_by_state(
                 # Fallback: показываем главное меню
                 return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
 
-    # EVA-коврики: ожидание марки (HYBRID MODE 🔄)
+    # EVA-коврики: ожидание марки (IMPROVED HYBRID MODE 🚀)
     elif current_state == WhatsAppState.EVA_WAITING_BRAND:
+        logger.info(f"🎯 [ROUTE] EVA_WAITING_BRAND state - processing brand input: '{text}'")
+
         # Проверяем, это ответ на fuzzy suggestion или обычный ввод
         user_data = get_user_data(chat_id)
 
@@ -1478,18 +1480,19 @@ async def route_message_by_state(
                 current_page = user_data.get("brands_page", 1)
                 return await whatsapp_handlers.show_brands_page(chat_id, current_page, tenant_config, session)
         else:
-            # 🔄 HYBRID: Проверяем, это вопрос или команда
+            # 🚀 IMPROVED HYBRID: Сначала проверяем, это явный вопрос?
             if is_likely_question(text):
-                logger.info(f"❓ [HYBRID] Обнаружен вопрос в EVA_WAITING_BRAND: '{text[:50]}'")
-                # Маршрутизуем на AI
+                logger.info(f"🤖 [HYBRID] Detected question in EVA_WAITING_BRAND, routing to AI: '{text[:50]}'")
                 return await get_and_handle_ai_response(chat_id, text, tenant_config, session)
             else:
-                # Обычная обработка марки через IVR
-                logger.info(f"🎯 [HYBRID] Обработка как IVR-команда: '{text[:50]}'")
+                # Обработка через IVR (цифры, названия марок, fuzzy search)
+                logger.info(f"🎯 [HYBRID] Processing as IVR command (brand selection/fuzzy): '{text[:50]}'")
                 return await whatsapp_handlers.handle_eva_brand_input(chat_id, text, tenant_config, session)
 
-    # EVA-коврики: ожидание модели (HYBRID MODE 🔄)
+    # EVA-коврики: ожидание модели (IMPROVED HYBRID MODE 🚀)
     elif current_state == WhatsAppState.EVA_WAITING_MODEL:
+        logger.info(f"🎯 [ROUTE] EVA_WAITING_MODEL state - processing model input: '{text}'")
+
         # Проверяем, это ответ на fuzzy suggestion или обычный ввод
         user_data = get_user_data(chat_id)
 
@@ -1499,35 +1502,43 @@ async def route_message_by_state(
                 suggested_model = user_data["suggested_model"]
                 # Очищаем suggestion из user_data
                 update_user_data(chat_id, {"suggested_model": None})
+                logger.info(f"✅ [HYBRID] Fuzzy suggestion accepted: {suggested_model}")
                 return await whatsapp_handlers.handle_eva_model_input(chat_id, suggested_model, tenant_config, session)
             else:
                 # Очищаем suggestion и показываем текущую страницу заново
                 update_user_data(chat_id, {"suggested_model": None})
                 brand_name = user_data.get("brand_name", "")
                 current_page = user_data.get("models_page", 1)
+                logger.info(f"↩️ [HYBRID] Fuzzy suggestion rejected, showing page {current_page}")
                 return await whatsapp_handlers.show_models_page(chat_id, current_page, brand_name, tenant_config, session)
         else:
-            # 🔄 HYBRID: Проверяем, это вопрос или команда
-            if is_likely_question(text):
-                logger.info(f"❓ [HYBRID] Обнаружен вопрос в EVA_WAITING_MODEL: '{text[:50]}'")
-                # Маршрутизуем на AI
-                return await get_and_handle_ai_response(chat_id, text, tenant_config, session)
-            else:
-                # Обычная обработка модели через IVR
-                logger.info(f"🎯 [HYBRID] Обработка как IVR-команда: '{text[:50]}'")
-                return await whatsapp_handlers.handle_eva_model_input(chat_id, text, tenant_config, session)
+            # ✅ NEW PATTERN: Try handler first
+            response = await whatsapp_handlers.handle_eva_model_input(chat_id, text, tenant_config, session)
 
-    # EVA-коврики: выбор опций (С бортами / Без бортов) (HYBRID MODE 🔄)
+            if response:
+                # Command recognized (digit, pagination, exact/fuzzy match)
+                logger.info(f"✅ [HYBRID] Model input processed successfully")
+                return response
+            else:
+                # Handler returned None - route to AI
+                logger.info(f"🤖 [HYBRID] Model not found or invalid input, routing to AI: '{text[:50]}'")
+                return await get_and_handle_ai_response(chat_id, text, tenant_config, session)
+
+    # EVA-коврики: выбор опций (С бортами / Без бортов) (IMPROVED HYBRID MODE 🚀)
     elif current_state == WhatsAppState.EVA_SELECTING_OPTIONS:
-        # 🔄 HYBRID: Проверяем, это вопрос или команда
-        if is_likely_question(text):
-            logger.info(f"❓ [HYBRID] Обнаружен вопрос в EVA_SELECTING_OPTIONS: '{text[:50]}'")
-            # Маршрутизуем на AI
-            return await get_and_handle_ai_response(chat_id, text, tenant_config, session)
+        logger.info(f"🎯 [ROUTE] EVA_SELECTING_OPTIONS state - processing option: '{text}'")
+
+        # Сначала пытаемся обработать как команду (цифру 1-3)
+        response = await whatsapp_handlers.handle_option_selection(chat_id, text, tenant_config, session)
+
+        if response:
+            # Команда распознана - возвращаем ответ
+            logger.info(f"✅ [HYBRID] Option processed successfully")
+            return response
         else:
-            # Обычная обработка выбора опций через IVR
-            logger.info(f"🎯 [HYBRID] Обработка как IVR-команда: '{text[:50]}'")
-            return await whatsapp_handlers.handle_option_selection(chat_id, text, tenant_config, session)
+            # Handler вернул None - это текст/вопрос, передаем в AI
+            logger.info(f"🤖 [HYBRID] Invalid option detected, routing to AI: '{text[:50]}'")
+            return await get_and_handle_ai_response(chat_id, text, tenant_config, session)
 
     # EVA-коврики: подтверждение заказа
     elif current_state == WhatsAppState.EVA_CONFIRMING_ORDER:
