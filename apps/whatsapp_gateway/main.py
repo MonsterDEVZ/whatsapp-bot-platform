@@ -1131,9 +1131,120 @@ async def route_message_by_state(
             try:
                 # Получаем ответ от Ассистента с передачей chat_id для сохранения истории
                 response = await assistant_manager.get_response(thread_id, text, chat_id=chat_id)
+                logger.info(f"📨 [AI_RESPONSE] Получен ответ от AI: {response}")
                 logger.info(f"✅ Получен ответ от Ассистента ({len(response)} символов)")
 
-                # Форматируем ответ для WhatsApp
+                # ═══════════════════════════════════════════════════════════════
+                # КРИТИЧНО: Проверяем, не является ли ответ JSON-командой
+                # ═══════════════════════════════════════════════════════════════
+                response_type, parsed_data = detect_response_type(response)
+                logger.info(f"🔍 [AI_RESPONSE] Тип ответа: {response_type}, Parsed data: {parsed_data}")
+
+                if response_type == "json" and parsed_data:
+                    # Проверяем тип намерения
+                    intent = parsed_data.get("intent", "order").upper()
+                    logger.info(f"🎯 [WAITING_FOR_CATEGORY] Обнаружен JSON с намерением: {intent}")
+
+                    # Обработка SHOW_CATALOG / SHOW_MAIN_MENU
+                    if intent in ["SHOW_CATALOG", "SHOW_MAIN_MENU"]:
+                        logger.info(f"📋 [{intent}] AI запросил показ меню")
+                        menu_handler = TENANT_MENU_HANDLERS.get(tenant_slug)
+                        if menu_handler:
+                            menu_data = await menu_handler(chat_id, tenant_config, "Гость")
+                            client = GreenAPIClient(tenant_config)
+                            await client.send_menu_response(chat_id, menu_data)
+                            set_state(chat_id, WhatsAppState.WAITING_FOR_CATEGORY_CHOICE)
+                            logger.info(f"🔄 [STATE] User {chat_id} state → WAITING_FOR_CATEGORY_CHOICE")
+                            return ""
+                        else:
+                            return "Извините, произошла ошибка. Попробуйте отправить 'Меню'."
+
+                    # Обработка ORDER - используем умную маршрутизацию
+                    elif intent == "ORDER":
+                        logger.info(f"🛒 [AI_ROUTER] Обнаружен JSON с намерением ORDER")
+
+                        order_data = extract_order_data(parsed_data)
+
+                        # Извлекаем данные, которые смог распознать AI
+                        category = order_data.get("category")
+                        brand = order_data.get("brand")
+                        model = order_data.get("model")
+
+                        logger.info(f"🧠 [AI_ROUTER] AI извлек: category={category}, brand={brand}, model={model}")
+
+                        # СЦЕНАРИЙ 4: AI не понял категорию → Показываем меню категорий
+                        if not category:
+                            logger.info("🎯 [AI_ROUTER] Категория не распознана → Показываем главное меню")
+                            return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
+
+                        # Получаем читаемое название категории
+                        category_name = get_category_name(category, tenant_config.i18n)
+                        logger.info(f"🏷️  [AI_ROUTER] category={category} → category_name={category_name}")
+
+                        # СЦЕНАРИЙ 3: AI распознал category + brand + model → Ищем лекала
+                        if brand and model:
+                            logger.info(f"🎯 [AI_ROUTER] ШАГ 3: Полные данные → Поиск лекал для {brand} {model}")
+
+                            update_user_data(chat_id, {
+                                "category": category,
+                                "category_name": category_name,
+                                "brand_name": brand,
+                                "model_name": model
+                            })
+
+                            set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
+
+                            logger.info(f"🚀 [AI_ROUTER] Запуск search_patterns_for_model")
+                            return await whatsapp_handlers.search_patterns_for_model(
+                                chat_id, model, brand, category, tenant_config, session
+                            )
+
+                        # СЦЕНАРИЙ 2: AI распознал category + brand → Показываем модели
+                        elif brand:
+                            logger.info(f"🎯 [AI_ROUTER] ШАГ 2: Есть марка '{brand}' → Показываем модели")
+
+                            update_user_data(chat_id, {
+                                "category": category,
+                                "category_name": category_name,
+                                "brand_name": brand
+                            })
+
+                            set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
+
+                            logger.info(f"🚀 [AI_ROUTER] Запуск show_models_page для {brand}")
+                            return await whatsapp_handlers.show_models_page(chat_id, 1, brand, tenant_config, session)
+
+                        # СЦЕНАРИЙ 1: AI распознал только category → Показываем марки
+                        else:
+                            logger.info(f"🎯 [AI_ROUTER] ШАГ 1: Есть категория '{category_name}' → Показываем марки")
+
+                            update_user_data(chat_id, {
+                                "category": category,
+                                "category_name": category_name,
+                                "brands_page": 1
+                            })
+
+                            set_state(chat_id, WhatsAppState.EVA_WAITING_BRAND)
+
+                            logger.info(f"🚀 [AI_ROUTER] Запуск show_brands_page")
+                            return await whatsapp_handlers.show_brands_page(chat_id, 1, tenant_config, session)
+
+                    # Обработка CALLBACK_REQUEST
+                    elif intent == "CALLBACK_REQUEST":
+                        logger.info(f"📞 [CALLBACK_REQUEST] Запрос на обратный звонок")
+                        callback_details = parsed_data.get("details", "Не указано")
+                        update_user_data(chat_id, {
+                            "callback_details": callback_details,
+                            "request_type": "callback"
+                        })
+                        set_state(chat_id, WhatsAppState.WAITING_FOR_NAME)
+                        return (
+                            "✅ Отлично! Я передам ваш запрос менеджеру.\n\n"
+                            "📝 Шаг 1/2: Введите ваше имя"
+                        )
+
+                # Если это обычный текстовый ответ (FAQ)
+                logger.info("📝 [AI_RESPONSE] Текстовый ответ (FAQ)")
                 formatted_response = format_response_for_platform(response, "whatsapp")
                 return formatted_response
 
