@@ -708,6 +708,166 @@ def is_greeting(text: str) -> bool:
     return any(greeting in text_lower for greeting in greetings)
 
 
+def is_likely_question(text: str) -> bool:
+    """
+    Определяет, является ли текст вопросом (для гибридной системы).
+
+    Если текст похож на вопрос, его нужно отправить на AI вместо обработки как команду.
+
+    Args:
+        text: Текст сообщения
+
+    Returns:
+        True если это вопрос, False если это команда
+    """
+    text_lower = text.lower().strip()
+
+    # Явный признак вопроса: знак "?"
+    if "?" in text_lower:
+        return True
+
+    # Вопросительные слова
+    question_words = [
+        "какие", "какая", "какой", "какое",
+        "что", "чего", "чему", "чем", "чём",
+        "как", "сколько", "почему", "зачем",
+        "где", "куда", "откуда",
+        "когда", "кто", "кого", "кому", "кем",
+        "можно ли", "есть ли", "может ли",
+        "а если", "а что",
+    ]
+
+    # Проверяем начало предложения (первые слова)
+    first_words = text_lower.split()[:3]  # Берем первые 3 слова
+    for word in first_words:
+        if any(qw in word for qw in question_words):
+            return True
+
+    # Длинные сообщения (>50 символов) с несколькими словами - вероятно вопросы
+    if len(text) > 50 and len(text.split()) > 7:
+        return True
+
+    return False
+
+
+async def get_and_handle_ai_response(
+    chat_id: str,
+    text: str,
+    tenant_config: Config,
+    session: AsyncSession
+) -> str:
+    """
+    Получает ответ от AI и обрабатывает его (JSON или текст).
+
+    Используется в гибридной системе когда IVR-обработчик не справился
+    или когда обнаружен вопрос вместо команды.
+
+    Args:
+        chat_id: ID чата
+        text: Текст сообщения
+        tenant_config: Конфигурация tenant
+        session: Сессия БД
+
+    Returns:
+        Обработанный ответ (текст или результат JSON-команды)
+    """
+    logger.info(f"🤖 [HYBRID] Маршрутизация на AI: '{text[:50]}...'")
+
+    # Получаем или создаем thread для AI
+    thread_id = get_or_create_thread(chat_id, assistant_manager)
+
+    # Получаем ответ от AI
+    response = await assistant_manager.get_response(thread_id, text, chat_id=chat_id)
+    logger.info(f"📨 [HYBRID] Ответ AI получен: {response[:100]}...")
+
+    # Проверяем тип ответа (JSON или текст)
+    response_type, parsed_data = detect_response_type(response)
+    logger.info(f"🔍 [HYBRID] Тип ответа: {response_type}")
+
+    if response_type == "json" and parsed_data:
+        intent = parsed_data.get("intent", "order").upper()
+        logger.info(f"🎯 [HYBRID] Обнаружен JSON с намерением: {intent}")
+
+        # Обработка SHOW_CATALOG / SHOW_MAIN_MENU
+        if intent in ["SHOW_CATALOG", "SHOW_MAIN_MENU"]:
+            logger.info("🏠 [HYBRID] Показываем главное меню")
+            return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
+
+        # Обработка ORDER - используем умную маршрутизацию
+        elif intent == "ORDER":
+            logger.info(f"🛒 [HYBRID] Обнаружен JSON с намерением ORDER")
+
+            order_data = extract_order_data(parsed_data)
+            category = order_data.get("category")
+            brand = order_data.get("brand")
+            model = order_data.get("model")
+
+            logger.info(f"🧠 [HYBRID] AI извлек: category={category}, brand={brand}, model={model}")
+
+            # СЦЕНАРИЙ 4: AI не понял категорию → Показываем меню категорий
+            if not category:
+                logger.info("🎯 [HYBRID] Категория не распознана → Показываем главное меню")
+                return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
+
+            category_name = get_category_name(category, tenant_config.i18n)
+
+            # СЦЕНАРИЙ 3: AI распознал category + brand + model → Ищем лекала
+            if brand and model:
+                logger.info(f"🎯 [HYBRID] ШАГ 3: Полные данные → Поиск лекал для {brand} {model}")
+                update_user_data(chat_id, {
+                    "category": category,
+                    "category_name": category_name,
+                    "brand_name": brand,
+                    "model_name": model
+                })
+
+                set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
+
+                logger.info(f"🚀 [HYBRID] Запуск search_patterns_for_model")
+                return await whatsapp_handlers.search_patterns_for_model(
+                    chat_id, model, brand, category, tenant_config, session
+                )
+
+            # СЦЕНАРИЙ 2: AI распознал category + brand → Показываем модели
+            elif brand:
+                logger.info(f"🎯 [HYBRID] ШАГ 2: Есть марка '{brand}' → Показываем модели")
+                update_user_data(chat_id, {
+                    "category": category,
+                    "category_name": category_name,
+                    "brand_name": brand
+                })
+
+                set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
+
+                logger.info(f"🚀 [HYBRID] Запуск show_models_page для {brand}")
+                return await whatsapp_handlers.show_models_page(chat_id, 1, brand, tenant_config, session)
+
+            # СЦЕНАРИЙ 1: AI распознал только category → Показываем марки
+            else:
+                logger.info(f"🎯 [HYBRID] ШАГ 1: Есть категория '{category_name}' → Показываем марки")
+                update_user_data(chat_id, {
+                    "category": category,
+                    "category_name": category_name,
+                    "brands_page": 1
+                })
+
+                set_state(chat_id, WhatsAppState.EVA_WAITING_BRAND)
+
+                logger.info(f"🚀 [HYBRID] Запуск show_brands_page")
+                return await whatsapp_handlers.show_brands_page(chat_id, 1, tenant_config, session)
+
+        # Обработка CALLBACK_REQUEST
+        elif intent == "CALLBACK_REQUEST":
+            logger.info("📞 [HYBRID] Обработка запроса обратного звонка")
+            set_state(chat_id, WhatsAppState.WAITING_FOR_NAME)
+            return await whatsapp_handlers.handle_callback_request(chat_id, tenant_config)
+
+    # Если это обычный текстовый ответ (FAQ)
+    logger.info("📝 [HYBRID] Это текстовый ответ, форматируем для WhatsApp")
+    formatted_response = format_response_for_platform(response, "whatsapp")
+    return formatted_response
+
+
 def is_ivr_command(text: str, state: WhatsAppState) -> bool:
     """
     Проверяет, является ли текстовое сообщение ожидаемой IVR-командой
@@ -1254,7 +1414,7 @@ async def route_message_by_state(
                 # Fallback: показываем главное меню
                 return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
 
-    # EVA-коврики: ожидание марки
+    # EVA-коврики: ожидание марки (HYBRID MODE 🔄)
     elif current_state == WhatsAppState.EVA_WAITING_BRAND:
         # Проверяем, это ответ на fuzzy suggestion или обычный ввод
         user_data = get_user_data(chat_id)
@@ -1272,10 +1432,17 @@ async def route_message_by_state(
                 current_page = user_data.get("brands_page", 1)
                 return await whatsapp_handlers.show_brands_page(chat_id, current_page, tenant_config, session)
         else:
-            # Обычный ввод марки
-            return await whatsapp_handlers.handle_eva_brand_input(chat_id, text, tenant_config, session)
+            # 🔄 HYBRID: Проверяем, это вопрос или команда
+            if is_likely_question(text):
+                logger.info(f"❓ [HYBRID] Обнаружен вопрос в EVA_WAITING_BRAND: '{text[:50]}'")
+                # Маршрутизуем на AI
+                return await get_and_handle_ai_response(chat_id, text, tenant_config, session)
+            else:
+                # Обычная обработка марки через IVR
+                logger.info(f"🎯 [HYBRID] Обработка как IVR-команда: '{text[:50]}'")
+                return await whatsapp_handlers.handle_eva_brand_input(chat_id, text, tenant_config, session)
 
-    # EVA-коврики: ожидание модели
+    # EVA-коврики: ожидание модели (HYBRID MODE 🔄)
     elif current_state == WhatsAppState.EVA_WAITING_MODEL:
         # Проверяем, это ответ на fuzzy suggestion или обычный ввод
         user_data = get_user_data(chat_id)
@@ -1294,12 +1461,27 @@ async def route_message_by_state(
                 current_page = user_data.get("models_page", 1)
                 return await whatsapp_handlers.show_models_page(chat_id, current_page, brand_name, tenant_config, session)
         else:
-            # Обычный ввод модели
-            return await whatsapp_handlers.handle_eva_model_input(chat_id, text, tenant_config, session)
+            # 🔄 HYBRID: Проверяем, это вопрос или команда
+            if is_likely_question(text):
+                logger.info(f"❓ [HYBRID] Обнаружен вопрос в EVA_WAITING_MODEL: '{text[:50]}'")
+                # Маршрутизуем на AI
+                return await get_and_handle_ai_response(chat_id, text, tenant_config, session)
+            else:
+                # Обычная обработка модели через IVR
+                logger.info(f"🎯 [HYBRID] Обработка как IVR-команда: '{text[:50]}'")
+                return await whatsapp_handlers.handle_eva_model_input(chat_id, text, tenant_config, session)
 
-    # EVA-коврики: выбор опций (С бортами / Без бортов)
+    # EVA-коврики: выбор опций (С бортами / Без бортов) (HYBRID MODE 🔄)
     elif current_state == WhatsAppState.EVA_SELECTING_OPTIONS:
-        return await whatsapp_handlers.handle_option_selection(chat_id, text, tenant_config, session)
+        # 🔄 HYBRID: Проверяем, это вопрос или команда
+        if is_likely_question(text):
+            logger.info(f"❓ [HYBRID] Обнаружен вопрос в EVA_SELECTING_OPTIONS: '{text[:50]}'")
+            # Маршрутизуем на AI
+            return await get_and_handle_ai_response(chat_id, text, tenant_config, session)
+        else:
+            # Обычная обработка выбора опций через IVR
+            logger.info(f"🎯 [HYBRID] Обработка как IVR-команда: '{text[:50]}'")
+            return await whatsapp_handlers.handle_option_selection(chat_id, text, tenant_config, session)
 
     # EVA-коврики: подтверждение заказа
     elif current_state == WhatsAppState.EVA_CONFIRMING_ORDER:
