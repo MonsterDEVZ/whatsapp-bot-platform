@@ -324,6 +324,15 @@ async def show_models_page(
 
     models_list = await get_models_for_brand_from_db(brand_name, tenant.id, session)
 
+    # ═══════════════════════════════════════════════════════════════
+    # КРИТИЧНО: Проверка на пустой список моделей
+    # ═══════════════════════════════════════════════════════════════
+    if not models_list or len(models_list) == 0:
+        logger.info(f"⚠️ [MODELS] Нет моделей для марки '{brand_name}' → Индивидуальный замер")
+        # Сразу предлагаем индивидуальный замер (как для Acura Акорд)
+        # Используем brand_name как model_name, т.к. конкретной модели нет
+        return await handle_patterns_not_found(chat_id, brand_name, "(модель не указана)", config)
+
     # Сохраняем полный список моделей в состояние
     update_user_data(chat_id, {"all_models": models_list, "models_page": page})
 
