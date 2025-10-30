@@ -1565,6 +1565,27 @@ async def root():
     }
 
 
+@app.get("/debug/tenants")
+async def debug_tenants():
+    """Debug endpoint to show tenant instance mapping."""
+    return {
+        "status": "ok",
+        "tenant_instances": {
+            instance_id: tenant_slug
+            for instance_id, tenant_slug in TENANT_INSTANCES.items()
+        },
+        "tenant_configs": {
+            tenant_slug: {
+                "instance_id": config.instance_id,
+                "phone_number": config.phone_number,
+                "api_url": config.api_url,
+                "ai_enabled": config.enable_dialog_mode
+            }
+            for tenant_slug, config in TENANTS_CONFIG.items()
+        }
+    }
+
+
 
 
 
