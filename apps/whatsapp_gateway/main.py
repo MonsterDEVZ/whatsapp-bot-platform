@@ -853,8 +853,8 @@ async def get_and_handle_ai_response(
 
                 set_state(chat_id, WhatsAppState.EVA_WAITING_BRAND)
 
-                logger.info(f"🚀 [HYBRID] Запуск show_brands_page")
-                return await whatsapp_handlers.show_brands_page(chat_id, 1, tenant_config, session)
+                logger.info(f"🚀 [HYBRID] Запуск show_brands_page с category_name='{category_name}'")
+                return await whatsapp_handlers.show_brands_page(chat_id, 1, tenant_config, session, category_name)
 
         # Обработка CALLBACK_REQUEST
         elif intent == "CALLBACK_REQUEST":

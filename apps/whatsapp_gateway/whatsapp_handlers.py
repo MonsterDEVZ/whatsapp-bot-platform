@@ -229,7 +229,8 @@ async def show_brands_page(
     chat_id: str,
     page: int,
     config: Config,
-    session: AsyncSession
+    session: AsyncSession,
+    category_name: str = None
 ) -> str:
     """
     Показывает страницу марок с пагинацией.
@@ -238,12 +239,18 @@ async def show_brands_page(
         chat_id: ID чата WhatsApp
         page: Номер страницы (начиная с 1)
         config: Конфигурация tenant
+        session: AsyncSession для БД
+        category_name: Название категории (для динамического заголовка)
 
     Returns:
         Текст с списком марок и командами навигации
     """
     user_data = get_user_data(chat_id)
     brands_list = user_data.get("all_brands")
+
+    # Если category_name не передан, читаем из user_data
+    if not category_name:
+        category_name = user_data.get("category_name", "Товары")
 
     if not brands_list:
         tenant = await get_tenant_by_slug(session, config.tenant_slug)
@@ -271,9 +278,9 @@ async def show_brands_page(
     end_idx = min(start_idx + BRANDS_PER_PAGE, total_brands)
     current_brands = brands_list[start_idx:end_idx]
 
-    # Формируем текст
+    # Формируем текст с ДИНАМИЧЕСКИМ заголовком
     text = (
-        f"🏆 EVA-коврики\n\n"
+        f"📦 {category_name}\n\n"
         f"📝 Шаг 1/3: Выберите марку автомобиля\n\n"
         f"Страница {page}/{total_pages}\n\n"
     )
