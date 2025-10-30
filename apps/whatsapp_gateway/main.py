@@ -959,6 +959,52 @@ async def route_message_by_state(
     current_state = get_state(chat_id)
     logger.info(f"🔀 [ROUTE] User {chat_id} in state: {current_state}, message: '{text}'")
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 🛠️ FAIL-SAFE: Перехват системных команд ДО отправки в AI
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Защита от ситуаций, когда AI игнорирует инструкции и отвечает текстом
+    # вместо JSON. Если пользователь явно запросил меню/каталог - показываем его.
+
+    normalized_text = text.lower().strip()
+
+    # Ключевые слова для принудительного показа меню
+    menu_keywords = [
+        "меню", "menu", "каталог", "catalog", "главное меню",
+        "main menu", "категории", "categories", "разделы", "башкы меню"
+    ]
+
+    # FAIL-SAFE #1: Команда "Меню" или "Каталог"
+    if any(keyword in normalized_text for keyword in menu_keywords):
+        # Проверяем, не является ли это частью более длинного вопроса
+        # Например: "Расскажите про EVA коврики и покажите меню" - это команда
+        # Но "В меню есть чехлы?" - это вопрос, пусть обрабатывает AI
+
+        # Если сообщение короткое (< 20 символов) или содержит явные команды
+        if len(text) < 20 or any(cmd in normalized_text for cmd in ["покажи", "show", "открой", "хочу", "дай"]):
+            logger.info(f"🛠️ [FAIL-SAFE] Обнаружена команда меню в тексте: '{text[:50]}...'")
+            logger.info(f"🛠️ [FAIL-SAFE] Принудительно показываю главное меню (защита от AI)")
+
+            # Устанавливаем состояние главного меню
+            set_state(chat_id, WhatsAppState.MAIN_MENU)
+
+            # Показываем меню напрямую
+            return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
+
+    # FAIL-SAFE #2: Команды "Назад" или "Отмена"
+    cancel_keywords = ["назад", "отмена", "back", "cancel", "артка", "отмену"]
+    if any(keyword in normalized_text for keyword in cancel_keywords):
+        logger.info(f"🛠️ [FAIL-SAFE] Обнаружена команда отмены: '{text[:50]}...'")
+        logger.info(f"🛠️ [FAIL-SAFE] Сброс состояния и показ главного меню")
+
+        # Сбрасываем состояние
+        clear_state(chat_id)
+        set_state(chat_id, WhatsAppState.MAIN_MENU)
+
+        # Показываем меню
+        return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+
     # IDLE или первое сообщение - используем AI Assistant для консультации
     if current_state == WhatsAppState.IDLE:
         logger.info(f"🤖 IDLE state - using AI Assistant for message: {text}")
