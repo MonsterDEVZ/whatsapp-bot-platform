@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 # In-memory хранилище: {chat_id: {"state": str, "data": dict, "updated_at": datetime}}
 user_states: Dict[str, Dict[str, Any]] = {}
 
+# In-memory хранилище для OpenAI Thread IDs: {chat_id: thread_id}
+thread_ids: Dict[str, str] = {}
+
 # Время жизни состояния (15 минут)
 # Если пользователь неактивен более 15 минут, его сессия сбрасывается
 STATE_TTL = timedelta(minutes=15)
@@ -35,6 +38,9 @@ class WhatsAppState:
     EVA_WAITING_MODEL = "eva_waiting_model"
     EVA_SELECTING_OPTIONS = "eva_selecting_options"
     EVA_CONFIRMING_ORDER = "eva_confirming_order"
+
+    # AI-режим: подтверждение после распознавания намерения
+    AI_CONFIRMING_ORDER = "ai_confirming_order"
 
     # Сбор контактов
     WAITING_FOR_NAME = "waiting_for_name"
@@ -167,3 +173,44 @@ def cleanup_expired_states():
         del user_states[chat_id]
 
     return len(expired_chats)
+
+
+# ==============================================================================
+# THREAD MANAGEMENT для OpenAI Assistants API
+# ==============================================================================
+
+async def get_thread_id(chat_id: str) -> Optional[str]:
+    """
+    Получает thread_id для данного чата.
+
+    Args:
+        chat_id: ID чата пользователя
+
+    Returns:
+        thread_id или None если не найден
+    """
+    return thread_ids.get(chat_id)
+
+
+async def set_thread_id(chat_id: str, thread_id: str):
+    """
+    Сохраняет thread_id для данного чата.
+
+    Args:
+        chat_id: ID чата пользователя
+        thread_id: OpenAI Thread ID
+    """
+    thread_ids[chat_id] = thread_id
+    logger.info(f"🧵 [THREAD_MANAGER] Сохранен thread_id={thread_id} для chat_id={chat_id[:15]}...")
+
+
+def clear_thread_id(chat_id: str):
+    """
+    Удаляет thread_id для данного чата.
+
+    Args:
+        chat_id: ID чата пользователя
+    """
+    if chat_id in thread_ids:
+        del thread_ids[chat_id]
+        logger.info(f"🗑️ [THREAD_MANAGER] Удален thread_id для chat_id={chat_id[:15]}...")

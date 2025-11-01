@@ -55,8 +55,9 @@ from packages.core.ai.response_parser import (
 from packages.core.utils.category_mapper import get_category_name
 
 # Импортируем наши обработчики
-from .state_manager import get_state, get_user_data, WhatsAppState, set_state, update_user_data
+from .state_manager import get_state, get_user_data, WhatsAppState, set_state, update_user_data, clear_thread_id
 from . import whatsapp_handlers
+from . import agent_manager  # НОВЫЙ АГЕНТНЫЙ МЕНЕДЖЕР
 
 # Импортируем модульные обработчики для каждого арендатора
 from .tenant_handlers import evopoliki_handler, five_deluxe_handler
@@ -502,191 +503,92 @@ async def handle_incoming_message(
     session: AsyncSession
 ):
     """
-    Обрабатывает входящее сообщение от пользователя WhatsApp.
-    Роутит сообщения по обработчикам в зависимости от tenant и состояния пользователя.
+    Обрабатывает входящее сообщение от пользователя WhatsApp через AI Agent.
+
+    НОВАЯ АРХИТЕКТУРА (Agent-First):
+    - Все сообщения обрабатываются через AI Agent
+    - AI Agent сам вызывает нужные инструменты
+    - Нет машины состояний - весь диалог контролирует AI
 
     Args:
         tenant_slug: Идентификатор tenant (evopoliki, five_deluxe)
         message_data: Данные сообщения из вебхука
         sender_data: Данные отправителя из вебхука
+        session: AsyncSession для работы с БД
     """
     try:
-        # Извлекаем информацию о сообщении
+        # ═══════════════════════════════════════════════════════════════════
+        # ШАГ 1: Извлекаем данные из вебхука
+        # ═══════════════════════════════════════════════════════════════════
         type_message = message_data.get("typeMessage")
         text_message = message_data.get("textMessageData", {}).get("textMessage", "")
         chat_id = sender_data.get("chatId")
         sender_name = sender_data.get("senderName", "Гость")
 
-        logger.info(f"💬 Message from {sender_name} ({chat_id}): {text_message}")
-
-        # ====================================================================
-        # 🔍 ПРОВЕРКА #1: СЕКРЕТНАЯ ОТЛАДОЧНАЯ КОМАНДА (ВЫСШИЙ ПРИОРИТЕТ)
-        # ====================================================================
-        if text_message.lower().startswith("ask_ai:"):
-            logger.info(f"🔍 [AI_DEBUG] Detected ask_ai command from {chat_id}")
-            logger.warning("⚠️ [AI_DEBUG] ask_ai command is deprecated and disabled for security")
-
-            # Возвращаем уведомление что команда отключена
-            tenant_config = TenantConfig(tenant_slug)
-            if tenant_config.is_valid():
-                client = GreenAPIClient(tenant_config)
-                await client.send_message(
-                    chat_id,
-                    "⚠️ Отладочная команда ask_ai отключена. Используйте обычные команды меню."
-                )
-
-            return  # Выходим, не обрабатывая дальше
-
-        # ====================================================================
-        # ⏱️  ПРОВЕРКА ТАЙМАУТА СЕССИИ (15 МИНУТ)
-        # ====================================================================
-        try:
-            memory = get_memory()
-            session_timed_out = memory.check_timeout(chat_id, timeout_seconds=900)
-
-            logger.info(f"⏱️  [TIMEOUT_CHECK] User: {chat_id}")
-            logger.info(f"⏱️  [TIMEOUT_CHECK] Session timed out: {session_timed_out}")
-
-            if session_timed_out:
-                # Сессия истекла - очищаем состояние и память
-                from state_manager import clear_state
-                clear_state(chat_id)
-                memory.clear_history(chat_id)
-
-                logger.critical(f"🔥 [TIMEOUT] Сессия для {sender_name} ({chat_id}) СБРОШЕНА по таймауту!")
-                logger.info(f"🗑️  [TIMEOUT] Очищены: FSM state + AI memory")
-
-                # ====================================================================
-                # 🎯 УМНОЕ ПРИВЕТСТВИЕ ПОСЛЕ ТАЙМАУТА
-                #
-                # НОВАЯ ЛОГИКА:
-                # - Если enable_dialog_mode=True → передаем приветствие в AI
-                # - Если enable_dialog_mode=False → показываем меню
-                # ====================================================================
-                if is_greeting(text_message):
-                    logger.info(f"👋 [TIMEOUT] Приветствие после таймаута от {sender_name}")
-
-                    # Загружаем конфигурацию tenant
-                    tenant_config = TenantConfig(tenant_slug)
-                    if tenant_config.is_valid():
-                        enable_ai = tenant_config.enable_dialog_mode
-
-                        logger.info(f"🎯 [TIMEOUT] enable_dialog_mode = {enable_ai}")
-
-                        if enable_ai:
-                            # AI РЕЖИМ: Пропускаем дальше, чтобы AI обработал приветствие
-                            logger.info(f"🤖 [TIMEOUT] AI режим → Передаем приветствие в AI Assistant")
-                            # НЕ делаем return - продолжаем выполнение, чтобы дойти до AI-обработчика
-                        else:
-                            # IVR РЕЖИМ: Показываем меню
-                            logger.info(f"📋 [TIMEOUT] IVR режим → Показываем меню")
-
-                            greeting_response = await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
-                            personalized_greeting = f"Здравствуйте, {sender_name}! Снова рад вас видеть. 😊\n\n{greeting_response}"
-
-                            client = GreenAPIClient(tenant_config)
-                            await client.send_message(chat_id, personalized_greeting)
-                            logger.info(f"✅ [TIMEOUT] Отправлено IVR-меню для {sender_name}")
-
-                            return  # Завершаем - меню показано
-
-        except Exception as e:
-            logger.error(f"❌ [TIMEOUT] Ошибка при проверке таймаута: {e}", exc_info=True)
-
-        # ====================================================================
-        # ✅ WHITELIST ОТКЛЮЧЕН - БОТ ОТВЕЧАЕТ ВСЕМ ПОЛЬЗОВАТЕЛЯМ
-        # ====================================================================
-        logger.info(f"✅ Processing message from {chat_id} (whitelist disabled)")
+        logger.info(f"💬 [INCOMING] Message from {sender_name} ({chat_id}): '{text_message}'")
 
         # Загружаем конфигурацию tenant
         tenant_config = TenantConfig(tenant_slug)
 
         if not tenant_config.is_valid():
-            logger.error(f"❌ Invalid tenant config for {tenant_slug}")
+            logger.error(f"❌ [INCOMING] Invalid tenant config for {tenant_slug}")
             return
 
-        # ====================================================================
-        # УНИФИЦИРОВАННЫЙ РОУТИНГ: ДИНАМИЧЕСКОЕ ПЕРЕКЛЮЧЕНИЕ AI/IVR
-        # ====================================================================
-        enable_ai = tenant_config.enable_dialog_mode
+        # ═══════════════════════════════════════════════════════════════════
+        # ШАГ 2: Обработка команды "Меню" - сброс Thread
+        # ═══════════════════════════════════════════════════════════════════
+        if text_message.lower() in ["меню", "menu", "/start", "start"]:
+            logger.info(f"🔄 [MENU] Команда 'Меню' - сброс Thread для {chat_id}")
 
-        logger.debug(f"[ROUTING] tenant={tenant_slug} enable_dialog_mode={enable_ai}")
-        logger.info(f"🔀 [ROUTING] {tenant_slug}: {'AI mode' if enable_ai else 'IVR mode'}")
+            # Очищаем Thread (начинаем диалог заново)
+            clear_thread_id(chat_id)
 
-        if enable_ai:
-            # ========== РЕЖИМ AI ВКЛЮЧЕН ==========
-            logger.info(f"🤖 [ROUTING] Dialog mode ENABLED -> AI Assistant flow")
+            # Очищаем историю в memory (если используется)
+            try:
+                memory = get_memory()
+                memory.clear_history(chat_id)
+                logger.info(f"🗑️ [MEMORY] История очищена для {chat_id}")
+            except Exception as e:
+                logger.warning(f"⚠️ [MEMORY] Ошибка очистки истории: {e}")
 
-            # Обработка команды "Меню" - возврат в главное меню
-            if text_message.lower() in ["меню", "menu", "/start", "start"]:
-                # Очищаем историю диалога
-                try:
-                    memory = get_memory()
-                    memory.clear_history(chat_id)
-                    logger.info(f"🗑️ [MEMORY] Очищена история для {chat_id}")
-                except Exception as e:
-                    logger.warning(f"⚠️ [MEMORY] Ошибка очистки: {e}")
+        # ═══════════════════════════════════════════════════════════════════
+        # ШАГ 3: Вызываем AI Agent для обработки сообщения
+        # ═══════════════════════════════════════════════════════════════════
+        logger.info(f"🤖 [AGENT] Передаю сообщение в AI Agent...")
 
-                # Показываем меню через диспетчер
-                menu_handler = TENANT_MENU_HANDLERS.get(tenant_slug)
-                if menu_handler:
-                    logger.info(f"📋 [MENU] Using tenant handler for {tenant_slug}")
-                    menu_data = await menu_handler(chat_id, tenant_config, sender_name)
+        response = await agent_manager.process_message_with_agent(
+            client=tenant_config.openai_client,
+            assistant_id=tenant_config.assistant_manager.assistant_id,
+            chat_id=chat_id,
+            text=text_message,
+            tenant_id=tenant_config.TENANT_ID,
+            session=session
+        )
 
-                    # Отправляем меню через универсальный метод
-                    client = GreenAPIClient(tenant_config)
-                    await client.send_menu_response(chat_id, menu_data)
-                    logger.info(f"✅ [MENU] Menu sent to {sender_name}")
+        logger.info(f"✅ [AGENT] Получен ответ от AI: '{response[:100]}...'")
 
-                    # Устанавливаем состояние ожидания выбора категории
-                    set_state(chat_id, WhatsAppState.WAITING_FOR_CATEGORY_CHOICE)
-                    logger.info(f"🔄 [STATE] User {chat_id} state changed to WAITING_FOR_CATEGORY_CHOICE")
-                    return
-                else:
-                    logger.warning(f"⚠️ [MENU] No handler found for {tenant_slug}, using fallback")
-                    response = await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
-            else:
-                # Роутим через AI Assistant
-                response = await route_message_by_state(chat_id, text_message, tenant_config, tenant_slug, session)
-
-        else:
-            # ========== РЕЖИМ IVR ONLY ==========
-            logger.info(f"📋 [ROUTING] Dialog mode DISABLED -> IVR menu flow ONLY")
-
-            # Используем диспетчер для обработки сообщений
-            message_handler = TENANT_MESSAGE_HANDLERS.get(tenant_slug)
-
-            if message_handler:
-                # Используем специфичный обработчик арендатора
-                logger.info(f"📋 [IVR] Using tenant message handler for {tenant_slug}")
-                response = await message_handler(chat_id, text_message, tenant_config, session, sender_name)
-            else:
-                # Используем меню по умолчанию для команды "меню"
-                if text_message.lower() in ["меню", "menu", "/start", "start"]:
-                    menu_handler = TENANT_MENU_HANDLERS.get(tenant_slug)
-                    if menu_handler:
-                        menu_data = await menu_handler(chat_id, tenant_config, sender_name)
-                        client = GreenAPIClient(tenant_config)
-                        await client.send_menu_response(chat_id, menu_data)
-                        logger.info(f"✅ [IVR] Menu sent to {sender_name}")
-
-                        # Устанавливаем состояние ожидания выбора категории
-                        set_state(chat_id, WhatsAppState.WAITING_FOR_CATEGORY_CHOICE)
-                        logger.info(f"🔄 [STATE] User {chat_id} state changed to WAITING_FOR_CATEGORY_CHOICE")
-                        return
-
-                # Fallback: используем общий обработчик evopoliki
-                logger.warning(f"⚠️ [IVR] No handler for {tenant_slug}, using default")
-                response = await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
-
-        # Отправляем ответ
+        # ═══════════════════════════════════════════════════════════════════
+        # ШАГ 4: Отправляем ответ пользователю
+        # ═══════════════════════════════════════════════════════════════════
         client = GreenAPIClient(tenant_config)
-        logger.info(f"📤 [SEND_MESSAGE] Sending response to {chat_id}: {response[:100]}...")
         await client.send_message(chat_id, response)
-        logger.info(f"✅ [SEND_MESSAGE] Successfully sent response to {sender_name}")
+
+        logger.info(f"✅ [INCOMING] Ответ отправлен {sender_name} ({chat_id})")
 
     except Exception as e:
-        logger.error(f"❌ Error handling incoming message: {e}", exc_info=True)
+        logger.error(f"❌ [INCOMING] КРИТИЧЕСКАЯ ОШИБКА: {e}", exc_info=True)
+
+        # Отправляем fallback-сообщение пользователю
+        try:
+            tenant_config = TenantConfig(tenant_slug)
+            if tenant_config.is_valid():
+                client = GreenAPIClient(tenant_config)
+                await client.send_message(
+                    chat_id,
+                    "Произошла техническая ошибка. Пожалуйста, попробуйте еще раз или напишите 'Меню'."
+                )
+        except Exception as fallback_error:
+            logger.error(f"❌ [INCOMING] Ошибка отправки fallback-сообщения: {fallback_error}")
 
 
 def is_greeting(text: str) -> bool:
@@ -801,7 +703,7 @@ async def get_and_handle_ai_response(
                 logger.info("🏠 [AI_HANDLER] Показываем главное меню")
                 return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
 
-            # Обработка ORDER - используем умную маршрутизацию
+            # Обработка ORDER - НОВАЯ ГИБРИДНАЯ ЛОГИКА
             elif intent == "ORDER":
                 logger.info(f"🛒 [AI_HANDLER] Обнаружен JSON с намерением ORDER")
 
@@ -812,57 +714,46 @@ async def get_and_handle_ai_response(
 
                 logger.info(f"🧠 [AI_HANDLER] AI извлек: category={category}, brand={brand}, model={model}")
 
-                # СЦЕНАРИЙ 4: AI не понял категорию → Показываем меню категорий
+                # СЦЕНАРИЙ: AI не понял категорию → Показываем меню категорий
                 if not category:
                     logger.info("🎯 [AI_HANDLER] Категория не распознана → Показываем главное меню")
                     return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
 
                 category_name = get_category_name(category, tenant_config.i18n)
 
-                # СЦЕНАРИЙ 3: AI распознал category + brand + model → Ищем лекала
+                # Сохраняем ВСЕ распознанные данные
+                update_user_data(chat_id, {
+                    "category": category,
+                    "category_name": category_name,
+                    "brand_name": brand if brand else None,
+                    "model_name": model if model else None
+                })
+
+                # Устанавливаем состояние AI_CONFIRMING_ORDER
+                set_state(chat_id, WhatsAppState.AI_CONFIRMING_ORDER)
+
+                # Формируем текстовый ответ с предложением продолжить
                 if brand and model:
-                    logger.info(f"🎯 [AI_HANDLER] ШАГ 3: Полные данные → Поиск лекал для {brand} {model}")
-                    update_user_data(chat_id, {
-                        "category": category,
-                        "category_name": category_name,
-                        "brand_name": brand,
-                        "model_name": model
-                    })
-
-                    set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
-
-                    logger.info(f"🚀 [AI_HANDLER] Запуск search_patterns_for_model")
-                    return await whatsapp_handlers.search_patterns_for_model(
-                        chat_id, model, brand, category, tenant_config, session
+                    # Полные данные
+                    response_text = (
+                        f"Да, конечно! Мы можем изготовить {category_name} для {brand} {model}.\n\n"
+                        f"Чтобы продолжить, нажмите 1 или напишите Да."
+                    )
+                elif brand:
+                    # Только марка
+                    response_text = (
+                        f"Да, конечно! Мы можем изготовить {category_name} для {brand}.\n\n"
+                        f"Чтобы продолжить к выбору модели, нажмите 1 или напишите Да."
+                    )
+                else:
+                    # Только категория
+                    response_text = (
+                        f"Да, конечно! У нас есть {category_name}.\n\n"
+                        f"Чтобы продолжить к выбору марки, нажмите 1 или напишите Да."
                     )
 
-                # СЦЕНАРИЙ 2: AI распознал category + brand → Показываем модели
-                elif brand:
-                    logger.info(f"🎯 [AI_HANDLER] ШАГ 2: Есть марка '{brand}' → Показываем модели")
-                    update_user_data(chat_id, {
-                        "category": category,
-                        "category_name": category_name,
-                        "brand_name": brand
-                    })
-
-                    set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
-
-                    logger.info(f"🚀 [AI_HANDLER] Запуск show_models_page для {brand}")
-                    return await whatsapp_handlers.show_models_page(chat_id, 1, brand, tenant_config, session)
-
-                # СЦЕНАРИЙ 1: AI распознал только category → Показываем марки
-                else:
-                    logger.info(f"🎯 [AI_HANDLER] ШАГ 1: Есть категория '{category_name}' → Показываем марки")
-                    update_user_data(chat_id, {
-                        "category": category,
-                        "category_name": category_name,
-                        "brands_page": 1
-                    })
-
-                    set_state(chat_id, WhatsAppState.EVA_WAITING_BRAND)
-
-                    logger.info(f"🚀 [AI_HANDLER] Запуск show_brands_page с category_name='{category_name}'")
-                    return await whatsapp_handlers.show_brands_page(chat_id, 1, tenant_config, session, category_name)
+                logger.info(f"✅ [AI_HANDLER] Переход в AI_CONFIRMING_ORDER, ожидаем подтверждение")
+                return response_text
 
             # Обработка CALLBACK_REQUEST
             elif intent == "CALLBACK_REQUEST":
@@ -947,659 +838,6 @@ def is_ivr_command(text: str, state: WhatsAppState) -> bool:
     # Для всех остальных состояний - не IVR-команда
     return False
 
-
-async def route_message_by_state(
-    chat_id: str,
-    text: str,
-    tenant_config: TenantConfig,
-    tenant_slug: str,
-    session: AsyncSession
-) -> str:
-    """
-    Роутит входящее сообщение к соответствующему обработчику
-    в зависимости от состояния пользователя.
-
-    УМНЫЙ РОУТИНГ:
-    - Если пользователь в IDLE или сообщение не является IVR-командой -> AI Assistant
-    - Если пользователь в FSM-состоянии и ввод соответствует ожиданиям -> IVR-обработчик
-
-    Args:
-        chat_id: ID чата WhatsApp
-        text: Текст сообщения
-        tenant_config: Конфигурация tenant
-        tenant_slug: Идентификатор tenant (для получения правильного AssistantManager)
-        session: Сессия БД
-
-    Returns:
-        Текст ответа для отправки пользователю
-    """
-    
-    # Получаем AssistantManager для этого tenant
-    assistant_manager = tenant_assistant_managers.get(tenant_slug)
-    current_state = get_state(chat_id)
-    logger.info(f"🔀 [ROUTE] User {chat_id} in state: {current_state}, message: '{text}'")
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # 🛠️ FAIL-SAFE: Перехват системных команд ДО отправки в AI
-    # ═══════════════════════════════════════════════════════════════════════════
-    # Защита от ситуаций, когда AI игнорирует инструкции и отвечает текстом
-    # вместо JSON. Если пользователь явно запросил меню/каталог - показываем его.
-
-    normalized_text = text.lower().strip()
-
-    # Ключевые слова для принудительного показа меню
-    menu_keywords = [
-        "меню", "menu", "каталог", "catalog", "главное меню",
-        "main menu", "категории", "categories", "разделы", "башкы меню"
-    ]
-
-    # FAIL-SAFE #1: Команда "Меню" или "Каталог"
-    if any(keyword in normalized_text for keyword in menu_keywords):
-        # Проверяем, не является ли это частью более длинного вопроса
-        # Например: "Расскажите про EVA коврики и покажите меню" - это команда
-        # Но "В меню есть чехлы?" - это вопрос, пусть обрабатывает AI
-
-        # Если сообщение короткое (< 20 символов) или содержит явные команды
-        if len(text) < 20 or any(cmd in normalized_text for cmd in ["покажи", "show", "открой", "хочу", "дай"]):
-            logger.info(f"🛠️ [FAIL-SAFE] Обнаружена команда меню в тексте: '{text[:50]}...'")
-            logger.info(f"🛠️ [FAIL-SAFE] Принудительно показываю главное меню (защита от AI)")
-
-            # Устанавливаем состояние главного меню
-            set_state(chat_id, WhatsAppState.MAIN_MENU)
-
-            # Показываем меню напрямую
-            return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
-
-    # FAIL-SAFE #2: Команды "Назад" или "Отмена"
-    cancel_keywords = ["назад", "отмена", "back", "cancel", "артка", "отмену"]
-    if any(keyword in normalized_text for keyword in cancel_keywords):
-        logger.info(f"🛠️ [FAIL-SAFE] Обнаружена команда отмены: '{text[:50]}...'")
-        logger.info(f"🛠️ [FAIL-SAFE] Сброс состояния и показ главного меню")
-
-        # Сбрасываем состояние
-        clear_state(chat_id)
-        set_state(chat_id, WhatsAppState.MAIN_MENU)
-
-        # Показываем меню
-        return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
-
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    # IDLE или первое сообщение - используем AI Assistant для консультации
-    if current_state == WhatsAppState.IDLE:
-        logger.info(f"🤖 IDLE state - using AI Assistant for message: {text}")
-        logger.info("=" * 60)
-        logger.info("🤖 *** AI HANDLER TRIGGERED *** 🤖")
-        logger.info("=" * 60)
-
-        # Получаем или создаем thread для пользователя
-        thread_id = get_or_create_thread(chat_id, assistant_manager)
-
-        try:
-            # Получаем ответ от Ассистента с передачей chat_id для сохранения истории
-            response = await assistant_manager.get_response(thread_id, text, chat_id=chat_id)
-            logger.info(f"📨 [AI_RESPONSE] Получен ответ от AI: {response}")
-            logger.info(f"✅ Получен ответ от Ассистента ({len(response)} символов)")
-
-            # Определяем тип ответа
-            response_type, parsed_data = detect_response_type(response)
-            logger.info(f"🔍 [AI_RESPONSE] Тип ответа: {response_type}, Parsed data: {parsed_data}")
-
-            if response_type == "json" and parsed_data:
-                # Проверяем тип намерения
-                intent = parsed_data.get("intent", "order").upper()
-                logger.info(f"🎯 Обнаружен JSON с намерением: {intent}")
-
-                # ============================================================
-                # СЦЕНАРИЙ: SHOW_CATALOG / SHOW_MAIN_MENU (Показ меню)
-                # ============================================================
-                if intent in ["SHOW_CATALOG", "SHOW_MAIN_MENU"]:
-                    logger.info(f"📋 [{intent}] AI запросил показ меню")
-
-                    # Вызываем обработчик меню для текущего tenant
-                    menu_handler = TENANT_MENU_HANDLERS.get(tenant_slug)
-
-                    if menu_handler:
-                        logger.info(f"✅ [{intent}] Вызываем menu handler для {tenant_slug}")
-                        menu_data = await menu_handler(chat_id, tenant_config, "Гость")
-
-                        # Отправляем меню
-                        client = GreenAPIClient(tenant_config)
-                        await client.send_menu_response(chat_id, menu_data)
-
-                        # КРИТИЧНО: Устанавливаем состояние ожидания выбора категории
-                        set_state(chat_id, WhatsAppState.WAITING_FOR_CATEGORY_CHOICE)
-                        logger.info(f"🔄 [STATE] User {chat_id} state → WAITING_FOR_CATEGORY_CHOICE")
-
-                        return ""  # Пустой ответ, т.к. меню уже отправлено
-                    else:
-                        logger.error(f"❌ [{intent}] Menu handler не найден для {tenant_slug}")
-                        return "Извините, произошла ошибка. Попробуйте отправить 'Меню'."
-
-                # ============================================================
-                # НОВЫЙ СЦЕНАРИЙ: CALLBACK_REQUEST (Запрос на обратный звонок)
-                # ============================================================
-                elif intent == "CALLBACK_REQUEST":
-                    logger.info(f"📞 [CALLBACK_REQUEST] Запрос на обратный звонок")
-
-                    # Извлекаем детали вопроса
-                    callback_details = parsed_data.get("details", "Не указано")
-                    logger.info(f"📝 [CALLBACK_REQUEST] Детали: {callback_details}")
-
-                    # Сохраняем детали в user_data
-                    update_user_data(chat_id, {
-                        "callback_details": callback_details,
-                        "request_type": "callback"
-                    })
-
-                    # Переходим к сбору контактов
-                    set_state(chat_id, WhatsAppState.WAITING_FOR_NAME)
-
-                    return (
-                        "✅ Отлично! Я передам ваш запрос менеджеру.\n\n"
-                        "📝 Шаг 1/2: Введите ваше имя"
-                    )
-
-                # ============================================================
-                # СЦЕНАРИЙ: ORDER (AI как умный маршрутизатор в воронку)
-                # ============================================================
-                elif intent == "ORDER":
-                    logger.info(f"🛒 [AI_ROUTER] Обнаружен JSON с намерением ORDER")
-
-                    order_data = extract_order_data(parsed_data)
-
-                    # Извлекаем данные, которые смог распознать AI
-                    category = order_data.get("category")
-                    brand = order_data.get("brand")
-                    model = order_data.get("model")
-
-                    logger.info(f"🧠 [AI_ROUTER] AI извлек: category={category}, brand={brand}, model={model}")
-
-                    # ═══════════════════════════════════════════════════════════════
-                    # УМНАЯ МАРШРУТИЗАЦИЯ: Запускаем воронку с нужного шага
-                    # ═══════════════════════════════════════════════════════════════
-
-                    # СЦЕНАРИЙ 4: AI не понял категорию → Показываем меню категорий
-                    if not category:
-                        logger.info("🎯 [AI_ROUTER] Категория не распознана → Показываем главное меню")
-                        return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
-
-                    # Получаем читаемое название категории
-                    category_name = get_category_name(category, tenant_config.i18n)
-                    logger.info(f"🏷️  [AI_ROUTER] category={category} → category_name={category_name}")
-
-                    # СЦЕНАРИЙ 3: AI распознал category + brand + model → Ищем лекала
-                    if brand and model:
-                        logger.info(f"🎯 [AI_ROUTER] ШАГ 3: Полные данные → Поиск лекал для {brand} {model}")
-
-                        # Сохраняем все данные в сессию
-                        update_user_data(chat_id, {
-                            "category": category,
-                            "category_name": category_name,
-                            "brand_name": brand,
-                            "model_name": model
-                        })
-
-                        # Устанавливаем состояние
-                        set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
-
-                        # Запускаем поиск лекал (воронка начинается с шага 3)
-                        logger.info(f"🚀 [AI_ROUTER] Запуск search_patterns_for_model")
-                        return await whatsapp_handlers.search_patterns_for_model(
-                            chat_id, model, brand, category, tenant_config, session
-                        )
-
-                    # СЦЕНАРИЙ 2: AI распознал category + brand → Показываем модели
-                    elif brand:
-                        logger.info(f"🎯 [AI_ROUTER] ШАГ 2: Есть марка '{brand}' → Показываем модели")
-
-                        # Сохраняем данные в сессию
-                        update_user_data(chat_id, {
-                            "category": category,
-                            "category_name": category_name,
-                            "brand_name": brand
-                        })
-
-                        # Устанавливаем состояние
-                        set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
-
-                        # Показываем модели для выбранной марки (воронка начинается с шага 2)
-                        logger.info(f"🚀 [AI_ROUTER] Запуск show_models_page для {brand}")
-                        return await whatsapp_handlers.show_models_page(chat_id, 1, brand, tenant_config, session)
-
-                    # СЦЕНАРИЙ 1: AI распознал только category → Показываем марки
-                    else:
-                        logger.info(f"🎯 [AI_ROUTER] ШАГ 1: Есть категория '{category_name}' → Показываем марки")
-
-                        # Сохраняем данные в сессию
-                        update_user_data(chat_id, {
-                            "category": category,
-                            "category_name": category_name,
-                            "brands_page": 1
-                        })
-
-                        # Устанавливаем состояние
-                        set_state(chat_id, WhatsAppState.EVA_WAITING_BRAND)
-
-                        # Показываем марки (воронка начинается с шага 1)
-                        logger.info(f"🚀 [AI_ROUTER] Запуск show_brands_page")
-                        return await whatsapp_handlers.show_brands_page(chat_id, 1, tenant_config, session)
-
-            else:
-                # Текстовый ответ (FAQ) - форматируем для WhatsApp и отправляем
-                logger.info("📝 Текстовый ответ (FAQ)")
-                formatted_response = format_response_for_platform(response, "whatsapp")
-                return formatted_response
-
-        except Exception as e:
-            logger.error(f"❌ Ошибка при обращении к Ассистенту: {e}")
-
-            # Fallback: показываем главное меню
-            return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
-
-    # Главное меню - проверяем, является ли это IVR-командой
-    elif current_state == WhatsAppState.MAIN_MENU:
-        if is_ivr_command(text, current_state):
-            # Ожидаемая цифра 1-5 - обрабатываем через IVR
-            return await whatsapp_handlers.handle_main_menu_choice(chat_id, text, tenant_config, session)
-        else:
-            # Свободный текст (например, "кто ты?", "какая гарантия?") - передаем в AI
-            logger.info(f"🤖 Main menu: unexpected text '{text}' - routing to AI Assistant")
-            logger.info("=" * 60)
-            logger.info("🤖 *** AI HANDLER TRIGGERED *** 🤖")
-            logger.info("=" * 60)
-
-            # Получаем или создаем thread для пользователя
-            thread_id = get_or_create_thread(chat_id, assistant_manager)
-
-            try:
-                # Получаем ответ от Ассистента с передачей chat_id для сохранения истории
-                response = await assistant_manager.get_response(thread_id, text, chat_id=chat_id)
-                logger.info(f"✅ Получен ответ от Ассистента ({len(response)} символов)")
-
-                # Определяем тип ответа
-                response_type, parsed_data = detect_response_type(response)
-
-                if response_type == "json" and parsed_data:
-                    # Проверяем тип намерения
-                    intent = parsed_data.get("intent", "order").upper()
-                    logger.info(f"🎯 Обнаружен JSON с намерением: {intent}")
-
-                    # Обработка SHOW_CATALOG / SHOW_MAIN_MENU
-                    if intent in ["SHOW_CATALOG", "SHOW_MAIN_MENU"]:
-                        logger.info(f"📋 [{intent}] AI запросил показ меню")
-
-                        menu_handler = TENANT_MENU_HANDLERS.get(tenant_slug)
-                        if menu_handler:
-                            menu_data = await menu_handler(chat_id, tenant_config, "Гость")
-                            client = GreenAPIClient(tenant_config)
-                            await client.send_menu_response(chat_id, menu_data)
-                            set_state(chat_id, WhatsAppState.WAITING_FOR_CATEGORY_CHOICE)
-                            logger.info(f"🔄 [STATE] User {chat_id} state → WAITING_FOR_CATEGORY_CHOICE")
-                            return ""
-                        else:
-                            return "Извините, произошла ошибка. Попробуйте отправить 'Меню'."
-
-                    # JSON ответ с намерением заказа - используем умную маршрутизацию
-                    logger.info(f"🛒 [AI_ROUTER] Обнаружен JSON с намерением ORDER: {parsed_data}")
-
-                    order_data = extract_order_data(parsed_data)
-
-                    # Извлекаем данные, которые смог распознать AI
-                    category = order_data.get("category")
-                    brand = order_data.get("brand")
-                    model = order_data.get("model")
-
-                    logger.info(f"🧠 [AI_ROUTER] AI извлек: category={category}, brand={brand}, model={model}")
-
-                    # ═══════════════════════════════════════════════════════════════
-                    # УМНАЯ МАРШРУТИЗАЦИЯ: Запускаем воронку с нужного шага
-                    # ═══════════════════════════════════════════════════════════════
-
-                    # СЦЕНАРИЙ 4: AI не понял категорию → Показываем меню категорий
-                    if not category:
-                        logger.info("🎯 [AI_ROUTER] Категория не распознана → Показываем главное меню")
-                        return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
-
-                    # Получаем читаемое название категории
-                    category_name = get_category_name(category, tenant_config.i18n)
-                    logger.info(f"🏷️  [AI_ROUTER] category={category} → category_name={category_name}")
-
-                    # СЦЕНАРИЙ 3: AI распознал category + brand + model → Ищем лекала
-                    if brand and model:
-                        logger.info(f"🎯 [AI_ROUTER] ШАГ 3: Полные данные → Поиск лекал для {brand} {model}")
-
-                        # Сохраняем все данные в сессию
-                        update_user_data(chat_id, {
-                            "category": category,
-                            "category_name": category_name,
-                            "brand_name": brand,
-                            "model_name": model
-                        })
-
-                        # Устанавливаем состояние
-                        set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
-
-                        # Запускаем поиск лекал (воронка начинается с шага 3)
-                        logger.info(f"🚀 [AI_ROUTER] Запуск search_patterns_for_model")
-                        return await whatsapp_handlers.search_patterns_for_model(
-                            chat_id, model, brand, category, tenant_config, session
-                        )
-
-                    # СЦЕНАРИЙ 2: AI распознал category + brand → Показываем модели
-                    elif brand:
-                        logger.info(f"🎯 [AI_ROUTER] ШАГ 2: Есть марка '{brand}' → Показываем модели")
-
-                        # Сохраняем данные в сессию
-                        update_user_data(chat_id, {
-                            "category": category,
-                            "category_name": category_name,
-                            "brand_name": brand
-                        })
-
-                        # Устанавливаем состояние
-                        set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
-
-                        # Показываем модели для выбранной марки (воронка начинается с шага 2)
-                        logger.info(f"🚀 [AI_ROUTER] Запуск show_models_page для {brand}")
-                        return await whatsapp_handlers.show_models_page(chat_id, 1, brand, tenant_config, session)
-
-                    # СЦЕНАРИЙ 1: AI распознал только category → Показываем марки
-                    else:
-                        logger.info(f"🎯 [AI_ROUTER] ШАГ 1: Есть категория '{category_name}' → Показываем марки")
-
-                        # Сохраняем данные в сессию
-                        update_user_data(chat_id, {
-                            "category": category,
-                            "category_name": category_name,
-                            "brands_page": 1
-                        })
-
-                        # Устанавливаем состояние
-                        set_state(chat_id, WhatsAppState.EVA_WAITING_BRAND)
-
-                        # Показываем марки (воронка начинается с шага 1)
-                        logger.info(f"🚀 [AI_ROUTER] Запуск show_brands_page")
-                        return await whatsapp_handlers.show_brands_page(chat_id, 1, tenant_config, session)
-
-                else:
-                    # Текстовый ответ (FAQ) - форматируем для WhatsApp и отправляем
-                    logger.info("📝 Текстовый ответ (FAQ)")
-                    formatted_response = format_response_for_platform(response, "whatsapp")
-                    return formatted_response
-
-            except Exception as e:
-                logger.error(f"❌ Ошибка при обращении к Ассистенту: {e}")
-
-                # Fallback: показываем главное меню
-                return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
-
-    # Ожидание выбора категории из меню
-    elif current_state == WhatsAppState.WAITING_FOR_CATEGORY_CHOICE:
-        logger.info(f"🎯 [ROUTE] WAITING_FOR_CATEGORY_CHOICE state - processing menu selection: '{text}'")
-
-        # Проверяем, является ли ввод цифрой (выбор категории из меню)
-        if text.strip().isdigit():
-            # Это выбор категории - обрабатываем через IVR
-            logger.info(f"✅ [ROUTE] User selected category number: {text}")
-            return await whatsapp_handlers.handle_main_menu_choice(chat_id, text, tenant_config, session)
-        else:
-            # Если это не цифра, возможно пользователь хочет задать вопрос
-            # Отправляем в AI Assistant для консультации
-            logger.info(f"🤖 [ROUTE] Non-numeric input in category selection - routing to AI: '{text}'")
-            logger.info("=" * 60)
-            logger.info("🤖 *** AI HANDLER TRIGGERED *** 🤖")
-            logger.info("=" * 60)
-
-            # Получаем или создаем thread для пользователя
-            thread_id = get_or_create_thread(chat_id, assistant_manager)
-
-            try:
-                # Получаем ответ от Ассистента с передачей chat_id для сохранения истории
-                response = await assistant_manager.get_response(thread_id, text, chat_id=chat_id)
-                logger.info(f"📨 [AI_RESPONSE] Получен ответ от AI: {response}")
-                logger.info(f"✅ Получен ответ от Ассистента ({len(response)} символов)")
-
-                # ═══════════════════════════════════════════════════════════════
-                # КРИТИЧНО: Проверяем, не является ли ответ JSON-командой
-                # ═══════════════════════════════════════════════════════════════
-                response_type, parsed_data = detect_response_type(response)
-                logger.info(f"🔍 [AI_RESPONSE] Тип ответа: {response_type}, Parsed data: {parsed_data}")
-
-                if response_type == "json" and parsed_data:
-                    # Проверяем тип намерения
-                    intent = parsed_data.get("intent", "order").upper()
-                    logger.info(f"🎯 [WAITING_FOR_CATEGORY] Обнаружен JSON с намерением: {intent}")
-
-                    # Обработка SHOW_CATALOG / SHOW_MAIN_MENU
-                    if intent in ["SHOW_CATALOG", "SHOW_MAIN_MENU"]:
-                        logger.info(f"📋 [{intent}] AI запросил показ меню")
-                        menu_handler = TENANT_MENU_HANDLERS.get(tenant_slug)
-                        if menu_handler:
-                            menu_data = await menu_handler(chat_id, tenant_config, "Гость")
-                            client = GreenAPIClient(tenant_config)
-                            await client.send_menu_response(chat_id, menu_data)
-                            set_state(chat_id, WhatsAppState.WAITING_FOR_CATEGORY_CHOICE)
-                            logger.info(f"🔄 [STATE] User {chat_id} state → WAITING_FOR_CATEGORY_CHOICE")
-                            return ""
-                        else:
-                            return "Извините, произошла ошибка. Попробуйте отправить 'Меню'."
-
-                    # Обработка ORDER - используем умную маршрутизацию
-                    elif intent == "ORDER":
-                        logger.info(f"🛒 [AI_ROUTER] Обнаружен JSON с намерением ORDER")
-
-                        order_data = extract_order_data(parsed_data)
-
-                        # Извлекаем данные, которые смог распознать AI
-                        category = order_data.get("category")
-                        brand = order_data.get("brand")
-                        model = order_data.get("model")
-
-                        logger.info(f"🧠 [AI_ROUTER] AI извлек: category={category}, brand={brand}, model={model}")
-
-                        # СЦЕНАРИЙ 4: AI не понял категорию → Показываем меню категорий
-                        if not category:
-                            logger.info("🎯 [AI_ROUTER] Категория не распознана → Показываем главное меню")
-                            return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
-
-                        # Получаем читаемое название категории
-                        category_name = get_category_name(category, tenant_config.i18n)
-                        logger.info(f"🏷️  [AI_ROUTER] category={category} → category_name={category_name}")
-
-                        # СЦЕНАРИЙ 3: AI распознал category + brand + model → Ищем лекала
-                        if brand and model:
-                            logger.info(f"🎯 [AI_ROUTER] ШАГ 3: Полные данные → Поиск лекал для {brand} {model}")
-
-                            update_user_data(chat_id, {
-                                "category": category,
-                                "category_name": category_name,
-                                "brand_name": brand,
-                                "model_name": model
-                            })
-
-                            set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
-
-                            logger.info(f"🚀 [AI_ROUTER] Запуск search_patterns_for_model")
-                            return await whatsapp_handlers.search_patterns_for_model(
-                                chat_id, model, brand, category, tenant_config, session
-                            )
-
-                        # СЦЕНАРИЙ 2: AI распознал category + brand → Показываем модели
-                        elif brand:
-                            logger.info(f"🎯 [AI_ROUTER] ШАГ 2: Есть марка '{brand}' → Показываем модели")
-
-                            update_user_data(chat_id, {
-                                "category": category,
-                                "category_name": category_name,
-                                "brand_name": brand
-                            })
-
-                            set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
-
-                            logger.info(f"🚀 [AI_ROUTER] Запуск show_models_page для {brand}")
-                            return await whatsapp_handlers.show_models_page(chat_id, 1, brand, tenant_config, session)
-
-                        # СЦЕНАРИЙ 1: AI распознал только category → Показываем марки
-                        else:
-                            logger.info(f"🎯 [AI_ROUTER] ШАГ 1: Есть категория '{category_name}' → Показываем марки")
-
-                            update_user_data(chat_id, {
-                                "category": category,
-                                "category_name": category_name,
-                                "brands_page": 1
-                            })
-
-                            set_state(chat_id, WhatsAppState.EVA_WAITING_BRAND)
-
-                            logger.info(f"🚀 [AI_ROUTER] Запуск show_brands_page")
-                            return await whatsapp_handlers.show_brands_page(chat_id, 1, tenant_config, session)
-
-                    # Обработка CALLBACK_REQUEST
-                    elif intent == "CALLBACK_REQUEST":
-                        logger.info(f"📞 [CALLBACK_REQUEST] Запрос на обратный звонок")
-                        callback_details = parsed_data.get("details", "Не указано")
-                        update_user_data(chat_id, {
-                            "callback_details": callback_details,
-                            "request_type": "callback"
-                        })
-                        set_state(chat_id, WhatsAppState.WAITING_FOR_NAME)
-                        return (
-                            "✅ Отлично! Я передам ваш запрос менеджеру.\n\n"
-                            "📝 Шаг 1/2: Введите ваше имя"
-                        )
-
-                # Если это обычный текстовый ответ (FAQ)
-                logger.info("📝 [AI_RESPONSE] Текстовый ответ (FAQ)")
-                formatted_response = format_response_for_platform(response, "whatsapp")
-                return formatted_response
-
-            except Exception as e:
-                logger.error(f"❌ Ошибка при обращении к Ассистенту: {e}")
-
-                # Fallback: показываем главное меню
-                return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
-
-    # EVA-коврики: ожидание марки (IMPROVED HYBRID MODE 🚀)
-    elif current_state == WhatsAppState.EVA_WAITING_BRAND:
-        logger.info(f"🎯 [ROUTE] EVA_WAITING_BRAND state - processing brand input: '{text}'")
-
-        # Проверяем, это ответ на fuzzy suggestion или обычный ввод
-        user_data = get_user_data(chat_id)
-
-        if "suggested_brand" in user_data and text in ["1", "2"]:
-            if text == "1":
-                # Используем предложенную марку
-                suggested_brand = user_data["suggested_brand"]
-                # Очищаем suggestion из user_data
-                update_user_data(chat_id, {"suggested_brand": None})
-                logger.info(f"✅ [HYBRID] Fuzzy suggestion accepted: {suggested_brand}")
-                return await whatsapp_handlers.handle_eva_brand_input(chat_id, suggested_brand, tenant_config, session)
-            else:
-                # Очищаем suggestion и показываем текущую страницу заново
-                update_user_data(chat_id, {"suggested_brand": None})
-                current_page = user_data.get("brands_page", 1)
-                logger.info(f"↩️ [HYBRID] Fuzzy suggestion rejected, showing page {current_page}")
-                return await whatsapp_handlers.show_brands_page(chat_id, current_page, tenant_config, session)
-        else:
-            # ✅ NEW PATTERN: Try handler first
-            response = await whatsapp_handlers.handle_eva_brand_input(chat_id, text, tenant_config, session)
-
-            if response:
-                # Command recognized (digit, pagination, exact/fuzzy match)
-                logger.info(f"✅ [HYBRID] Brand input processed successfully")
-                return response
-            else:
-                # Handler returned None - route to AI
-                logger.info(f"🤖 [HYBRID] Brand not found or invalid input, routing to AI: '{text[:50]}'")
-                return await get_and_handle_ai_response(chat_id, text, tenant_config, session)
-
-    # EVA-коврики: ожидание модели (IMPROVED HYBRID MODE 🚀)
-    elif current_state == WhatsAppState.EVA_WAITING_MODEL:
-        logger.info(f"🎯 [ROUTE] EVA_WAITING_MODEL state - processing model input: '{text}'")
-
-        # Проверяем, это ответ на fuzzy suggestion или обычный ввод
-        user_data = get_user_data(chat_id)
-
-        if "suggested_model" in user_data and text in ["1", "2"]:
-            if text == "1":
-                # Используем предложенную модель
-                suggested_model = user_data["suggested_model"]
-                # Очищаем suggestion из user_data
-                update_user_data(chat_id, {"suggested_model": None})
-                logger.info(f"✅ [HYBRID] Fuzzy suggestion accepted: {suggested_model}")
-                return await whatsapp_handlers.handle_eva_model_input(chat_id, suggested_model, tenant_config, session)
-            else:
-                # Очищаем suggestion и показываем текущую страницу заново
-                update_user_data(chat_id, {"suggested_model": None})
-                brand_name = user_data.get("brand_name", "")
-                current_page = user_data.get("models_page", 1)
-                logger.info(f"↩️ [HYBRID] Fuzzy suggestion rejected, showing page {current_page}")
-                return await whatsapp_handlers.show_models_page(chat_id, current_page, brand_name, tenant_config, session)
-        else:
-            # ✅ NEW PATTERN: Try handler first
-            response = await whatsapp_handlers.handle_eva_model_input(chat_id, text, tenant_config, session)
-
-            if response:
-                # Command recognized (digit, pagination, exact/fuzzy match)
-                logger.info(f"✅ [HYBRID] Model input processed successfully")
-                return response
-            else:
-                # Handler returned None - route to AI
-                logger.info(f"🤖 [HYBRID] Model not found or invalid input, routing to AI: '{text[:50]}'")
-                return await get_and_handle_ai_response(chat_id, text, tenant_config, session)
-
-    # EVA-коврики: выбор опций (С бортами / Без бортов) (IMPROVED HYBRID MODE 🚀)
-    elif current_state == WhatsAppState.EVA_SELECTING_OPTIONS:
-        logger.info(f"🎯 [ROUTE] EVA_SELECTING_OPTIONS state - processing option: '{text}'")
-
-        # Сначала пытаемся обработать как команду (цифру 1-3)
-        response = await whatsapp_handlers.handle_option_selection(chat_id, text, tenant_config, session)
-
-        if response:
-            # Команда распознана - возвращаем ответ
-            logger.info(f"✅ [HYBRID] Option processed successfully")
-            return response
-        else:
-            # Handler вернул None - это текст/вопрос, передаем в AI
-            logger.info(f"🤖 [HYBRID] Invalid option detected, routing to AI: '{text[:50]}'")
-            return await get_and_handle_ai_response(chat_id, text, tenant_config, session)
-
-    # EVA-коврики: подтверждение заказа (IMPROVED HYBRID MODE 🚀)
-    elif current_state == WhatsAppState.EVA_CONFIRMING_ORDER:
-        logger.info(f"🎯 [ROUTE] EVA_CONFIRMING_ORDER state - processing confirmation: '{text}'")
-
-        # ✅ NEW PATTERN: Try handler first
-        response = await whatsapp_handlers.handle_order_confirmation(chat_id, text, tenant_config)
-
-        if response:
-            # Confirmation recognized (да, 1, ок, etc.)
-            logger.info(f"✅ [HYBRID] Order confirmation processed successfully")
-            return response
-        else:
-            # Handler returned None - route to AI
-            logger.info(f"🤖 [HYBRID] Invalid confirmation or question detected, routing to AI: '{text[:50]}'")
-            return await get_and_handle_ai_response(chat_id, text, tenant_config, session)
-
-    # Сбор контактов: ожидание имени
-    # Телефон автоматически извлекается из chat_id внутри handle_name_input
-    elif current_state == WhatsAppState.WAITING_FOR_NAME:
-        return await whatsapp_handlers.handle_name_input(chat_id, text, tenant_config, session)  # ✅ Передаём session!
-
-    # Связь с менеджером
-    elif current_state == WhatsAppState.CONTACT_MANAGER:
-        # Возвращаем в меню
-        return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
-
-    # Неизвестное состояние - сбрасываем в главное меню
-    else:
-        logger.warning(f"Unknown state: {current_state}, resetting to main menu")
-        return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
-
-
-# ============================================================================
-# HEALTH CHECK & STARTUP
-# ============================================================================
 
 @app.get("/")
 async def root():
