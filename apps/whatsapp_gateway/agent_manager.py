@@ -109,7 +109,7 @@ async def process_message_with_agent(
     # ШАГ 3: Запускаем Assistant (создаем Run)
     # ─────────────────────────────────────────────────────────────────────
     logger.info(f"🏃 [AGENT] Запускаю Assistant...")
-    run = await client.beta.threads.runs.create(
+    run = client.beta.threads.runs.create(
         thread_id=thread_id,
         assistant_id=assistant_id
     )
@@ -205,7 +205,7 @@ async def process_message_with_agent(
             # Отправляем результаты вызовов обратно в OpenAI
             # ─────────────────────────────────────────────────────────────
             logger.info(f"📤 [AGENT] Отправляю {len(tool_outputs)} результатов в OpenAI...")
-            run = await client.beta.threads.runs.submit_tool_outputs(
+            run = client.beta.threads.runs.submit_tool_outputs(
                 thread_id=thread_id,
                 run_id=run.id,
                 tool_outputs=tool_outputs
@@ -221,7 +221,7 @@ async def process_message_with_agent(
             await asyncio.sleep(1)  # Ждем 1 секунду перед следующей проверкой
 
             # Обновляем статус Run
-            run = await client.beta.threads.runs.retrieve(
+            run = client.beta.threads.runs.retrieve(
                 thread_id=thread_id,
                 run_id=run.id
             )
@@ -235,7 +235,7 @@ async def process_message_with_agent(
         # Run успешно завершен - получаем ответ AI
         logger.info(f"✅ [AGENT] Получаю финальный ответ AI...")
 
-        messages = await client.beta.threads.messages.list(
+        messages = client.beta.threads.messages.list(
             thread_id=thread_id,
             limit=1,
             order="desc"
