@@ -59,7 +59,9 @@ from .state_manager import (
     update_user_data,
     clear_state
 )
-from . import agent_manager  # Упрощенный AI для распознавания намерений
+import json
+import asyncio as async_lib  # Переименовываем чтобы не конфликтовать с asyncio из contextlib
+
 from . import whatsapp_handlers  # IVR-воронка
 from .tenant_handlers import evopoliki_handler, five_deluxe_handler  # Tenant-specific обработчики
 
@@ -488,39 +490,130 @@ async def webhook_handler(
 
 
 # ============================================================================
+# ПРИВАТНАЯ ФУНКЦИЯ ДЛЯ РАБОТЫ С AI
+# ============================================================================
+
+async def _get_ai_response(
+    chat_id: str,
+    text: str,
+    assistant_manager: AssistantManager
+) -> str:
+    """
+    ПРИВАТНАЯ функция для получения ответа от OpenAI Assistant.
+
+    Используется ТОЛЬКО для распознавания намерения пользователя.
+    Возвращает либо JSON с командой, либо текстовый ответ.
+
+    Args:
+        chat_id: ID чата пользователя
+        text: Текст сообщения от пользователя
+        assistant_manager: AssistantManager с клиентом и assistant_id
+
+    Returns:
+        str: Ответ от AI (JSON или текст)
+    """
+    from .state_manager import get_thread_id, set_thread_id
+
+    logger.info(f"🤖 [AI] Запрос к AI для распознавания намерения")
+    logger.info(f"🤖 [AI] Message: '{text}'")
+
+    client = assistant_manager.client
+    assistant_id = assistant_manager.assistant_id
+
+    # Получаем или создаем Thread
+    thread_id = await get_thread_id(chat_id)
+
+    if not thread_id:
+        logger.info(f"🧵 [AI] Создаю новый Thread...")
+        thread = client.beta.threads.create()
+        thread_id = thread.id
+        await set_thread_id(chat_id, thread_id)
+        logger.info(f"🧵 [AI] ✅ Thread создан: {thread_id}")
+    else:
+        logger.info(f"🧵 [AI] Используем Thread: {thread_id}")
+
+    # Добавляем сообщение
+    client.beta.threads.messages.create(
+        thread_id=thread_id,
+        role="user",
+        content=text
+    )
+
+    # Запускаем Assistant
+    run = client.beta.threads.runs.create(
+        thread_id=thread_id,
+        assistant_id=assistant_id
+    )
+    logger.info(f"🏃 [AI] Run создан: {run.id}")
+
+    # Ждем завершения
+    max_wait_time = 30
+    elapsed_time = 0
+
+    while run.status in ["queued", "in_progress"]:
+        if elapsed_time >= max_wait_time:
+            logger.error(f"❌ [AI] Превышено время ожидания")
+            return "Извините, обработка заняла слишком много времени. Попробуйте еще раз."
+
+        await async_lib.sleep(1)
+        elapsed_time += 1
+
+        run = client.beta.threads.runs.retrieve(
+            thread_id=thread_id,
+            run_id=run.id
+        )
+
+    logger.info(f"🏁 [AI] Run завершен: {run.status}")
+
+    # Обрабатываем результат
+    if run.status == "completed":
+        messages = client.beta.threads.messages.list(
+            thread_id=thread_id,
+            limit=1,
+            order="desc"
+        )
+
+        if messages.data and len(messages.data) > 0:
+            response = messages.data[0].content[0].text.value
+            logger.info(f"✅ [AI] Ответ получен: '{response[:100]}...'")
+            return response
+        else:
+            return "Извините, не удалось получить ответ."
+
+    elif run.status == "failed":
+        error_msg = run.last_error.message if run.last_error else "Unknown"
+        logger.error(f"❌ [AI] Run failed: {error_msg}")
+        return "Извините, произошла техническая ошибка."
+
+    else:
+        logger.error(f"❌ [AI] Неожиданный статус: {run.status}")
+        return "Произошла ошибка. Попробуйте позже."
+
+
+# ============================================================================
 # HELPER FUNCTIONS - IVR Routing and AI Command Handling
 # ============================================================================
 
 async def route_message_by_state(
     chat_id: str,
     text: str,
-    current_state: WhatsAppState,
     tenant_config,
-    tenant_slug: str,
     session: AsyncSession
-) -> str:
+) -> Optional[str]:
     """
-    Маршрутизирует сообщение пользователя к соответствующему обработчику IVR-воронки.
+    === НАДЕЖНАЯ IVR-ВОРОНКА ===
 
-    Эта функция вызывается ТОЛЬКО когда пользователь находится в воронке (state != IDLE).
-    AI НЕ вызывается - вся логика выполняется кодом.
-
-    Args:
-        chat_id: ID чата пользователя
-        text: Текст сообщения
-        current_state: Текущее состояние пользователя
-        tenant_config: Конфигурация tenant
-        tenant_slug: Идентификатор tenant
-        session: AsyncSession для работы с БД
+    Маршрутизирует сообщение к обработчику в зависимости от состояния.
 
     Returns:
-        str: Ответ для отправки пользователю
+        str: Ответ для пользователя
+        None: Если IVR не смог обработать (нужно передать AI)
     """
-    logger.info(f"🔀 [IVR] Маршрутизация по состоянию: {current_state}")
+    current_state = get_state(chat_id)
+    logger.info(f"🔀 [IVR] State: {current_state}, Text: '{text}'")
 
-    # Вызываем обработчик IVR-воронки из whatsapp_handlers
-    # Это та же логика, которая работала "по цифрам"
     try:
+        # Делегируем обработку в whatsapp_handlers.route_by_state
         response = await whatsapp_handlers.route_by_state(
             chat_id=chat_id,
             text=text,
@@ -530,7 +623,7 @@ async def route_message_by_state(
         )
         return response
     except Exception as e:
-        logger.error(f"❌ [IVR] Ошибка в IVR-воронке: {e}", exc_info=True)
+        logger.error(f"❌ [IVR] Ошибка: {e}", exc_info=True)
         return "Произошла ошибка. Напишите 'Меню' для начала заново."
 
 
@@ -538,42 +631,26 @@ async def handle_ai_command(
     chat_id: str,
     command_data: Dict[str, Any],
     tenant_config,
-    tenant_slug: str,
-    session: AsyncSession
-) -> str:
+    session: AsyncSession,
+    client: GreenAPIClient
+):
     """
     Обрабатывает команду от AI и запускает IVR-воронку.
 
-    Эта функция вызывается когда AI распознал намерение пользователя
-    и вернул JSON с intent. Она извлекает данные из JSON, сохраняет их
-    в сессию пользователя и передает управление в IVR-воронку.
-
-    Args:
-        chat_id: ID чата пользователя
-        command_data: JSON с данными от AI (intent, category, brand, model и т.д.)
-        tenant_config: Конфигурация tenant
-        tenant_slug: Идентификатор tenant
-        session: AsyncSession для работы с БД
-
-    Returns:
-        str: Ответ для отправки пользователю
+    ВАЖНО: Эта функция сама отправляет ответ пользователю!
     """
-    logger.info(f"📋 [AI_COMMAND] Обработка команды от AI: {command_data}")
-
     intent = command_data.get("intent", "").upper()
+    logger.info(f"🚀 [AI_ROUTER] Выполнение команды '{intent}'")
 
-    # Обработка intent: ORDER (заказ)
     if intent == "ORDER":
-        logger.info(f"🛒 [AI_COMMAND] Intent: ORDER -> запуск IVR-воронки")
-
-        # Извлекаем данные, которые распознал AI
+        # Извлекаем распознанные данные
         category = command_data.get("category")
         brand = command_data.get("brand")
         model = command_data.get("model")
 
-        logger.info(f"📦 [AI_COMMAND] Распознано - category: {category}, brand: {brand}, model: {model}")
+        logger.info(f"📦 [ORDER] category={category}, brand={brand}, model={model}")
 
-        # Сохраняем данные в сессию пользователя
+        # Сохраняем в user_data
         if category:
             update_user_data(chat_id, "category", category)
         if brand:
@@ -581,139 +658,44 @@ async def handle_ai_command(
         if model:
             update_user_data(chat_id, "model", model)
 
-        # Определяем с какого шага начать IVR-воронку
+        # Определяем точку входа в IVR
+        response = None
+
         if category and brand and model:
-            # AI распознал всё -> сразу к опциям
-            set_state(chat_id, WhatsAppState.WAITING_FOR_OPTIONS_CHOICE)
+            # Всё распознано → к опциям
+            set_state(chat_id, WhatsAppState.EVA_SELECTING_OPTIONS)
             response = await whatsapp_handlers.handle_options_selection(
-                chat_id=chat_id,
-                tenant_config=tenant_config,
-                session=session
+                chat_id, tenant_config, session
             )
         elif category and brand:
-            # AI распознал категорию и марку -> спрашиваем модель
-            set_state(chat_id, WhatsAppState.WAITING_FOR_MODEL_CHOICE)
+            # Категория + марка → спросить модель
+            set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
             response = await whatsapp_handlers.handle_brand_selection(
-                chat_id=chat_id,
-                brand_name=brand,
-                tenant_config=tenant_config,
-                session=session
+                chat_id, brand, tenant_config, session
             )
         elif category:
-            # AI распознал только категорию -> спрашиваем марку
-            set_state(chat_id, WhatsAppState.WAITING_FOR_BRAND_CHOICE)
+            # Только категория → спросить марку
+            set_state(chat_id, WhatsAppState.EVA_WAITING_BRAND)
             response = await whatsapp_handlers.handle_category_selection(
-                chat_id=chat_id,
-                category_code=category,
-                tenant_config=tenant_config,
-                session=session
+                chat_id, category, tenant_config, session
             )
         else:
-            # AI не распознал категорию -> показываем каталог
-            set_state(chat_id, WhatsAppState.WAITING_FOR_CATEGORY_CHOICE)
+            # Ничего не распознано → каталог
+            set_state(chat_id, WhatsAppState.MAIN_MENU)
             response = await whatsapp_handlers.show_categories(
-                chat_id=chat_id,
-                tenant_config=tenant_config,
-                session=session
+                chat_id, tenant_config, session
             )
 
-        return response
+        # Отправляем ответ
+        if response:
+            await client.send_message(chat_id, response)
 
-    # Обработка других intents (если будут добавлены в будущем)
     else:
-        logger.warning(f"⚠️ [AI_COMMAND] Неизвестный intent: {intent}")
-        return f"Я понял ваш запрос, но пока не могу его обработать. Напишите 'Меню' для выбора услуги."
-
-
-async def process_user_input_with_ai(
-    chat_id: str,
-    text: str,
-    assistant_manager: AssistantManager,
-    tenant_config,
-    tenant_slug: str,
-    session: AsyncSession
-) -> str:
-    """
-    ЕДИНСТВЕННЫЙ ЦЕНТР УПРАВЛЕНИЯ AI.
-
-    Эта функция - единственное место в коде, которое общается с AI.
-    Она вызывает AI, обрабатывает ответ (включая очистку markdown),
-    парсит JSON и решает что делать дальше.
-
-    Это гарантирует, что JSON-команды от AI НИКОГДА не попадут пользователю.
-
-    Args:
-        chat_id: ID чата пользователя
-        text: Текст сообщения от пользователя
-        assistant_manager: AssistantManager для общения с AI
-        tenant_config: Конфигурация tenant
-        tenant_slug: Идентификатор tenant
-        session: AsyncSession для работы с БД
-
-    Returns:
-        str: Ответ для отправки пользователю
-    """
-    logger.info(f"🤖 [AI_CENTER] ===== ВЫЗОВ AI ДЛЯ РАСПОЗНАВАНИЯ НАМЕРЕНИЯ =====")
-
-    # ═══════════════════════════════════════════════════════════════════
-    # ШАГ 1: Вызываем AI для получения ответа
-    # ═══════════════════════════════════════════════════════════════════
-    ai_response = await agent_manager.get_ai_response(
-        client=assistant_manager.client,
-        assistant_id=assistant_manager.assistant_id,
-        chat_id=chat_id,
-        text=text
-    )
-
-    logger.info(f"✅ [AI_CENTER] Ответ получен: '{ai_response[:100]}...'")
-
-    # ═══════════════════════════════════════════════════════════════════
-    # ШАГ 2: КРИТИЧНО - Очищаем от markdown-обертки ```json ... ```
-    # ═══════════════════════════════════════════════════════════════════
-    cleaned_response = ai_response
-
-    if '```json' in ai_response:
-        logger.info("📄 [JSON_PARSER] Обнаружена markdown-обертка, очищаю...")
-        try:
-            # Извлекаем чистый JSON из блока кода
-            cleaned_response = ai_response.split('```json')[1].split('```')[0].strip()
-            logger.info(f"✅ [JSON_PARSER] JSON успешно извлечен: '{cleaned_response[:100]}...'")
-        except IndexError:
-            logger.error("❌ [JSON_PARSER] Ошибка при извлечении JSON из markdown")
-            # Если извлечь не удалось, считаем это обычным текстом
-            cleaned_response = ai_response
-
-    # ═══════════════════════════════════════════════════════════════════
-    # ШАГ 3: Пытаемся распарсить JSON
-    # ═══════════════════════════════════════════════════════════════════
-    try:
-        import json
-        command_data = json.loads(cleaned_response)
-
-        if "intent" in command_data:
-            # ✅ AI вернул команду с намерением -> запускаем IVR
-            logger.info(f"📋 [JSON_PARSER] Обнаружен intent: {command_data.get('intent')}")
-            logger.info(f"🚀 [JSON_PARSER] Запускаю IVR-воронку...")
-
-            response = await handle_ai_command(
-                chat_id=chat_id,
-                command_data=command_data,
-                tenant_config=tenant_config,
-                tenant_slug=tenant_slug,
-                session=session
-            )
-
-            logger.info(f"✅ [JSON_PARSER] IVR-воронка вернула ответ")
-            return response
-        else:
-            # JSON без intent -> считаем обычным текстом
-            logger.info(f"📄 [JSON_PARSER] JSON без intent, отправляем как текст")
-            return cleaned_response
-
-    except (json.JSONDecodeError, TypeError) as e:
-        # AI вернул обычный текст (приветствие, ответ на вопрос)
-        logger.info(f"📄 [JSON_PARSER] AI вернул текст (не JSON): {type(e).__name__}")
-        return cleaned_response
+        # Неизвестный intent
+        await client.send_message(
+            chat_id,
+            "Я понял ваш запрос, но пока не могу его обработать. Напишите 'Меню'."
+        )
 
 
 async def handle_incoming_message(
@@ -813,59 +795,54 @@ async def handle_incoming_message(
         logger.info(f"🔍 [STATE_CHECK] User state: {current_state}")
 
         # ═══════════════════════════════════════════════════════════════════
-        # ВЕТКА A: Пользователь в воронке (state != IDLE)
+        # ПРОСТАЯ И НАДЕЖНАЯ ЛОГИКА
         # ═══════════════════════════════════════════════════════════════════
+        response_text = None
+        client = GreenAPIClient(tenant_config)
+
+        # 1. Если пользователь УЖЕ в воронке, работает ТОЛЬКО IVR
         if current_state != WhatsAppState.IDLE:
-            logger.info(f"🔀 [ROUTE] Пользователь в воронке -> IVR (БЕЗ AI)")
-
-            # Передаем управление в IVR-воронку
-            response = await route_message_by_state(
-                chat_id=chat_id,
-                text=text_message,
-                current_state=current_state,
-                tenant_config=tenant_config,
-                tenant_slug=tenant_slug,
-                session=session
+            logger.info(f"🔀 [IVR] Пользователь в воронке -> IVR")
+            response_text = await route_message_by_state(
+                chat_id, text_message, tenant_config, session
             )
 
-            # ═══════════════════════════════════════════════════════════════════
-            # ГИБРИДНЫЙ РЕЖИМ: Если IVR вернул None, передаем AI
-            # ═══════════════════════════════════════════════════════════════════
-            if response is None:
-                logger.info(f"🔄 [HYBRID] IVR вернул None → передаю AI для обработки вопроса")
+        # 2. Если IVR не смог обработать ИЛИ пользователь в IDLE, обращаемся к AI
+        if response_text is None:
+            logger.info("🤖 [ROUTER] Передаю в AI для распознавания...")
+            ai_response = await _get_ai_response(chat_id, text_message, assistant_manager)
 
-                response = await process_user_input_with_ai(
-                    chat_id=chat_id,
-                    text=text_message,
-                    assistant_manager=assistant_manager,
-                    tenant_config=tenant_config,
-                    tenant_slug=tenant_slug,
-                    session=session
-                )
+            # 3. Пытаемся распознать КОМАНДУ в ответе AI
+            try:
+                # Очистка от markdown
+                cleaned = ai_response
+                if '```json' in ai_response:
+                    logger.info("📄 [JSON] Очищаю markdown...")
+                    cleaned = ai_response.split('```json')[1].split('```')[0].strip()
 
-        # ═══════════════════════════════════════════════════════════════════
-        # ВЕТКА B: Пользователь в IDLE (первое сообщение или после "Меню")
-        # ═══════════════════════════════════════════════════════════════════
-        else:
-            logger.info(f"🤖 [AI] Пользователь в IDLE -> вызов ЕДИНОГО ЦЕНТРА УПРАВЛЕНИЯ AI")
+                command_data = json.loads(cleaned)
 
-            # ✅ ЕДИНСТВЕННОЕ МЕСТО ВЫЗОВА AI - через централизованную функцию
-            response = await process_user_input_with_ai(
-                chat_id=chat_id,
-                text=text_message,
-                assistant_manager=assistant_manager,
-                tenant_config=tenant_config,
-                tenant_slug=tenant_slug,
-                session=session
-            )
+                if "intent" in command_data:
+                    # ЗАПУСКАЕМ IVR-ВОРОНКУ ЧЕРЕЗ AI
+                    logger.info(f"📋 [JSON] Intent: {command_data['intent']}")
+                    await handle_ai_command(
+                        chat_id, command_data, tenant_config, session, client
+                    )
+                    # Ответ уже отправлен внутри handle_ai_command
+                    return
 
-        # ═══════════════════════════════════════════════════════════════════
-        # ШАГ 4: Отправляем ответ пользователю
-        # ═══════════════════════════════════════════════════════════════════
-        if response:
-            client = GreenAPIClient(tenant_config)
-            await client.send_message(chat_id, response)
-            logger.info(f"✅ [SEND] Ответ отправлен {sender_name} ({chat_id})")
+                else:
+                    # JSON без intent
+                    response_text = cleaned
+
+            except (json.JSONDecodeError, TypeError, IndexError):
+                # AI вернул обычный текст
+                response_text = ai_response
+
+        # 4. Если в итоге есть текстовый ответ (от IVR или AI), отправляем его
+        if response_text:
+            await client.send_message(chat_id, response_text)
+            logger.info(f"✅ [SEND] Ответ отправлен")
 
     except Exception as e:
         logger.error(f"❌ [INCOMING] КРИТИЧЕСКАЯ ОШИБКА: {e}", exc_info=True)
