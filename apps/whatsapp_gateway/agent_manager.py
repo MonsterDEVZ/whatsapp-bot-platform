@@ -87,7 +87,7 @@ async def process_message_with_agent(
     if not thread_id:
         # Thread не существует - создаем новый
         logger.info(f"🧵 [AGENT] Thread не найден, создаю новый...")
-        thread = await client.beta.threads.create()
+        thread = client.beta.threads.create()
         thread_id = thread.id
         await set_thread_id(chat_id, thread_id)
         logger.info(f"🧵 [AGENT] ✅ Создан новый Thread: {thread_id}")
