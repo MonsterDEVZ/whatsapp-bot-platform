@@ -98,7 +98,7 @@ async def process_message_with_agent(
     # ШАГ 2: Добавляем сообщение пользователя в Thread
     # ─────────────────────────────────────────────────────────────────────
     logger.info(f"💬 [AGENT] Добавляю сообщение в Thread...")
-    await client.beta.threads.messages.create(
+    client.beta.threads.messages.create(
         thread_id=thread_id,
         role="user",
         content=text
