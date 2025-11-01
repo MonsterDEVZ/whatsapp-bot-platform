@@ -45,43 +45,16 @@ from packages.core.config import Config
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession as SQLAsyncSession
 from sqlalchemy import text
 from packages.core.memory import init_memory, get_memory
-from packages.core.ai.assistant import AssistantManager, get_or_create_thread
-from packages.core.ai.response_parser import (
-    detect_response_type,
-    extract_order_data,
-    format_response_for_platform,
-    clean_text_for_whatsapp
-)
-from packages.core.utils.category_mapper import get_category_name
+from packages.core.ai.assistant import AssistantManager
+from packages.core.ai.response_parser import clean_text_for_whatsapp
 
 # Импортируем наши обработчики
-from .state_manager import get_state, get_user_data, WhatsAppState, set_state, update_user_data, clear_thread_id
-from . import whatsapp_handlers
+from .state_manager import clear_thread_id  # Оставляем только управление thread
 from . import agent_manager  # НОВЫЙ АГЕНТНЫЙ МЕНЕДЖЕР
-
-# Импортируем модульные обработчики для каждого арендатора
-from .tenant_handlers import evopoliki_handler, five_deluxe_handler
 
 # Глобальный словарь AssistantManager для каждого tenant
 # Формат: {tenant_slug: AssistantManager}
 tenant_assistant_managers: Dict[str, AssistantManager] = {}
-
-# ============================================================================
-# TENANT HANDLERS DISPATCHER
-# ============================================================================
-
-# Диспетчер обработчиков меню для каждого арендатора
-# Ключ: tenant_slug, Значение: функция-обработчик
-TENANT_MENU_HANDLERS = {
-    'evopoliki': evopoliki_handler.handle_evopoliki_menu,
-    'five_deluxe': five_deluxe_handler.handle_5deluxe_menu,
-}
-
-# Диспетчер обработчиков сообщений для каждого арендатора
-TENANT_MESSAGE_HANDLERS = {
-    'evopoliki': None,  # evopoliki использует общие обработчики
-    'five_deluxe': five_deluxe_handler.handle_5deluxe_message,
-}
 
 # Глобальные переменные для БД (инициализируются в lifespan)
 db_engine = None
@@ -520,7 +493,6 @@ async def handle_incoming_message(
         # ═══════════════════════════════════════════════════════════════════
         # ШАГ 1: Извлекаем данные из вебхука
         # ═══════════════════════════════════════════════════════════════════
-        type_message = message_data.get("typeMessage")
         text_message = message_data.get("textMessageData", {}).get("textMessage", "")
         chat_id = sender_data.get("chatId")
         sender_name = sender_data.get("senderName", "Гость")
@@ -534,13 +506,20 @@ async def handle_incoming_message(
             logger.error(f"❌ [INCOMING] Invalid tenant config for {tenant_slug}")
             return
 
+        # Получаем AssistantManager для этого tenant
+        assistant_manager = tenant_assistant_managers.get(tenant_slug)
+        if not assistant_manager:
+            logger.error(f"❌ [INCOMING] No AssistantManager for {tenant_slug}")
+            return
+
+        # Определяем tenant_id (1 для evopoliki, 2 для five_deluxe)
+        tenant_id = 1 if tenant_slug == "evopoliki" else 2
+
         # ═══════════════════════════════════════════════════════════════════
         # ШАГ 2: Обработка команды "Меню" - сброс Thread
         # ═══════════════════════════════════════════════════════════════════
         if text_message.lower() in ["меню", "menu", "/start", "start"]:
             logger.info(f"🔄 [MENU] Команда 'Меню' - сброс Thread для {chat_id}")
-
-            # Очищаем Thread (начинаем диалог заново)
             clear_thread_id(chat_id)
 
             # Очищаем историю в memory (если используется)
@@ -557,11 +536,11 @@ async def handle_incoming_message(
         logger.info(f"🤖 [AGENT] Передаю сообщение в AI Agent...")
 
         response = await agent_manager.process_message_with_agent(
-            client=tenant_config.openai_client,
-            assistant_id=tenant_config.assistant_manager.assistant_id,
+            client=assistant_manager.client,
+            assistant_id=assistant_manager.assistant_id,
             chat_id=chat_id,
             text=text_message,
-            tenant_id=tenant_config.TENANT_ID,
+            tenant_id=tenant_id,
             session=session
         )
 
@@ -570,10 +549,10 @@ async def handle_incoming_message(
         # ═══════════════════════════════════════════════════════════════════
         # ШАГ 4: Отправляем ответ пользователю
         # ═══════════════════════════════════════════════════════════════════
-        client = GreenAPIClient(tenant_config)
-        await client.send_message(chat_id, response)
-
-        logger.info(f"✅ [INCOMING] Ответ отправлен {sender_name} ({chat_id})")
+        if response:  # Проверяем что ответ не пустой
+            client = GreenAPIClient(tenant_config)
+            await client.send_message(chat_id, response)
+            logger.info(f"✅ [INCOMING] Ответ отправлен {sender_name} ({chat_id})")
 
     except Exception as e:
         logger.error(f"❌ [INCOMING] КРИТИЧЕСКАЯ ОШИБКА: {e}", exc_info=True)
@@ -589,254 +568,6 @@ async def handle_incoming_message(
                 )
         except Exception as fallback_error:
             logger.error(f"❌ [INCOMING] Ошибка отправки fallback-сообщения: {fallback_error}")
-
-
-def is_greeting(text: str) -> bool:
-    """
-    Проверяет, является ли сообщение приветствием.
-
-    Args:
-        text: Текст сообщения
-
-    Returns:
-        True если это приветствие, False в противном случае
-    """
-    greetings = [
-        "привет", "здравствуй", "здравствуйте", "приветствую",
-        "hello", "hi", "hey", "добрый день", "доброе утро", "добрый вечер",
-        "доброй ночи", "хай", "хей", "салам", "сәлем"
-    ]
-    text_lower = text.lower().strip()
-    return any(greeting in text_lower for greeting in greetings)
-
-
-def is_likely_question(text: str) -> bool:
-    """
-    Определяет, является ли текст вопросом (для гибридной системы).
-
-    Если текст похож на вопрос, его нужно отправить на AI вместо обработки как команду.
-
-    Args:
-        text: Текст сообщения
-
-    Returns:
-        True если это вопрос, False если это команда
-    """
-    text_lower = text.lower().strip()
-
-    # Явный признак вопроса: знак "?"
-    if "?" in text_lower:
-        return True
-
-    # Вопросительные слова
-    question_words = [
-        "какие", "какая", "какой", "какое",
-        "что", "чего", "чему", "чем", "чём",
-        "как", "сколько", "почему", "зачем",
-        "где", "куда", "откуда",
-        "когда", "кто", "кого", "кому", "кем",
-        "можно ли", "есть ли", "может ли",
-        "а если", "а что",
-    ]
-
-    # Проверяем начало предложения (первые слова)
-    first_words = text_lower.split()[:3]  # Берем первые 3 слова
-    for word in first_words:
-        if any(qw in word for qw in question_words):
-            return True
-
-    # Длинные сообщения (>50 символов) с несколькими словами - вероятно вопросы
-    if len(text) > 50 and len(text.split()) > 7:
-        return True
-
-    return False
-
-
-async def get_and_handle_ai_response(
-    chat_id: str,
-    text: str,
-    tenant_config: Config,
-    session: AsyncSession
-) -> str:
-    """
-    Получает ответ от AI и обрабатывает его (JSON или текст).
-
-    Используется в гибридной системе когда IVR-обработчик не справился
-    или когда обнаружен вопрос вместо команды.
-
-    Args:
-        chat_id: ID чата
-        text: Текст сообщения
-        tenant_config: Конфигурация tenant
-        session: Сессия БД
-
-    Returns:
-        Обработанный ответ (текст или результат JSON-команды)
-    """
-    logger.info("=" * 80)
-    logger.info(f"🧠 [AI_HANDLER] === НАЧАЛО ОБРАБОТКИ AI ЗАПРОСА ===")
-    logger.info(f"🧠 [AI_HANDLER] Chat ID: {chat_id}")
-    logger.info(f"🧠 [AI_HANDLER] Получен запрос для AI: '{text}'")
-    logger.info("=" * 80)
-
-    try:
-        # Получаем или создаем thread для AI
-        thread_id = get_or_create_thread(chat_id, assistant_manager)
-        logger.info(f"🧠 [AI_HANDLER] Thread ID: {thread_id}")
-
-        # Получаем ответ от AI
-        logger.info(f"🧠 [AI_HANDLER] Отправляем запрос к OpenAI Assistant...")
-        response = await assistant_manager.get_response(thread_id, text, chat_id=chat_id)
-        logger.info(f"🧠 [AI_HANDLER] ✅ AI вернул ответ (длина: {len(response)} символов)")
-        logger.info(f"🧠 [AI_HANDLER] Первые 200 символов ответа: {response[:200]}...")
-
-        # Проверяем тип ответа (JSON или текст)
-        response_type, parsed_data = detect_response_type(response)
-        logger.info(f"🔍 [AI_HANDLER] Тип ответа: {response_type}")
-
-        if response_type == "json" and parsed_data:
-            intent = parsed_data.get("intent", "order").upper()
-            logger.info(f"🎯 [AI_HANDLER] Обнаружен JSON с намерением: {intent}")
-
-            # Обработка SHOW_CATALOG / SHOW_MAIN_MENU
-            if intent in ["SHOW_CATALOG", "SHOW_MAIN_MENU"]:
-                logger.info("🏠 [AI_HANDLER] Показываем главное меню")
-                return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
-
-            # Обработка ORDER - НОВАЯ ГИБРИДНАЯ ЛОГИКА
-            elif intent == "ORDER":
-                logger.info(f"🛒 [AI_HANDLER] Обнаружен JSON с намерением ORDER")
-
-                order_data = extract_order_data(parsed_data)
-                category = order_data.get("category")
-                brand = order_data.get("brand")
-                model = order_data.get("model")
-
-                logger.info(f"🧠 [AI_HANDLER] AI извлек: category={category}, brand={brand}, model={model}")
-
-                # СЦЕНАРИЙ: AI не понял категорию → Показываем меню категорий
-                if not category:
-                    logger.info("🎯 [AI_HANDLER] Категория не распознана → Показываем главное меню")
-                    return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
-
-                category_name = get_category_name(category, tenant_config.i18n)
-
-                # Сохраняем ВСЕ распознанные данные
-                update_user_data(chat_id, {
-                    "category": category,
-                    "category_name": category_name,
-                    "brand_name": brand if brand else None,
-                    "model_name": model if model else None
-                })
-
-                # Устанавливаем состояние AI_CONFIRMING_ORDER
-                set_state(chat_id, WhatsAppState.AI_CONFIRMING_ORDER)
-
-                # Формируем текстовый ответ с предложением продолжить
-                if brand and model:
-                    # Полные данные
-                    response_text = (
-                        f"Да, конечно! Мы можем изготовить {category_name} для {brand} {model}.\n\n"
-                        f"Чтобы продолжить, нажмите 1 или напишите Да."
-                    )
-                elif brand:
-                    # Только марка
-                    response_text = (
-                        f"Да, конечно! Мы можем изготовить {category_name} для {brand}.\n\n"
-                        f"Чтобы продолжить к выбору модели, нажмите 1 или напишите Да."
-                    )
-                else:
-                    # Только категория
-                    response_text = (
-                        f"Да, конечно! У нас есть {category_name}.\n\n"
-                        f"Чтобы продолжить к выбору марки, нажмите 1 или напишите Да."
-                    )
-
-                logger.info(f"✅ [AI_HANDLER] Переход в AI_CONFIRMING_ORDER, ожидаем подтверждение")
-                return response_text
-
-            # Обработка CALLBACK_REQUEST
-            elif intent == "CALLBACK_REQUEST":
-                logger.info("📞 [AI_HANDLER] Обработка запроса обратного звонка")
-                set_state(chat_id, WhatsAppState.WAITING_FOR_NAME)
-                return await whatsapp_handlers.handle_callback_request(chat_id, tenant_config)
-
-        # Если это обычный текстовый ответ (FAQ)
-        logger.info("📝 [AI_HANDLER] Это текстовый ответ, форматируем для WhatsApp")
-        formatted_response = format_response_for_platform(response, "whatsapp")
-        logger.info(f"🧠 [AI_HANDLER] === КОНЕЦ ОБРАБОТКИ (успешно) ===")
-        return formatted_response
-
-    except Exception as e:
-        logger.error("=" * 80)
-        logger.error(f"💥 [AI_HANDLER] === ОШИБКА ПРИ ОБРАЩЕНИИ К AI ===")
-        logger.error(f"💥 [AI_HANDLER] Ошибка: {type(e).__name__}")
-        logger.error(f"💥 [AI_HANDLER] Сообщение: {str(e)}")
-        logger.error("=" * 80)
-
-        # Fallback: показываем главное меню
-        logger.info(f"🔄 [AI_HANDLER] Fallback: возвращаем в главное меню")
-        return await whatsapp_handlers.handle_start_message(chat_id, tenant_config)
-
-
-def is_ivr_command(text: str, state: WhatsAppState) -> bool:
-    """
-    Проверяет, является ли текстовое сообщение ожидаемой IVR-командой
-    для текущего состояния.
-
-    Args:
-        text: Текст сообщения
-        state: Текущее состояние FSM
-
-    Returns:
-        True если это ожидаемая IVR-команда, False если это свободный текст для AI
-    """
-    text = text.strip()
-
-    # Главное меню: ожидаем цифры 1-5
-    if state == WhatsAppState.MAIN_MENU:
-        return text in ["1", "2", "3", "4", "5"]
-
-    # EVA: ожидание марки - цифры 1-8, пагинация 00/99, или текст марки
-    elif state == WhatsAppState.EVA_WAITING_BRAND:
-        # Пагинация
-        if text in ["00", "99"]:
-            return True
-        # Выбор из списка (1-8)
-        if text.isdigit() and 1 <= int(text) <= 8:
-            return True
-        # Текстовый ввод марки - считаем IVR-командой (обработчик поддерживает)
-        return True
-
-    # EVA: ожидание модели - цифры 1-8, пагинация 00/99, или текст модели
-    elif state == WhatsAppState.EVA_WAITING_MODEL:
-        # Пагинация
-        if text in ["00", "99"]:
-            return True
-        # Выбор из списка (1-8)
-        if text.isdigit() and 1 <= int(text) <= 8:
-            return True
-        # Ответы на fuzzy suggestion (1 или 2)
-        if text in ["1", "2"]:
-            return True
-        # Текстовый ввод модели - считаем IVR-командой
-        return True
-
-    # EVA: выбор опций - ожидаем цифры 1-3
-    elif state == WhatsAppState.EVA_SELECTING_OPTIONS:
-        return text in ["1", "2", "3"]
-
-    # EVA: подтверждение заказа - ожидаем "1" или текстовые варианты подтверждения
-    elif state == WhatsAppState.EVA_CONFIRMING_ORDER:
-        positive_answers = ["1", "да", "yes", "ок", "ok", "+", "конечно", "давай", "давайте"]
-        return text.lower() in positive_answers
-
-    # Сбор контактов - любой текст является ожидаемым вводом
-    elif state == WhatsAppState.WAITING_FOR_NAME:
-        return True
-
-    # Для всех остальных состояний - не IVR-команда
-    return False
 
 
 @app.get("/")
