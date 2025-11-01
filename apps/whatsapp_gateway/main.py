@@ -625,6 +625,97 @@ async def handle_ai_command(
         return f"Я понял ваш запрос, но пока не могу его обработать. Напишите 'Меню' для выбора услуги."
 
 
+async def process_user_input_with_ai(
+    chat_id: str,
+    text: str,
+    assistant_manager: AssistantManager,
+    tenant_config,
+    tenant_slug: str,
+    session: AsyncSession
+) -> str:
+    """
+    ЕДИНСТВЕННЫЙ ЦЕНТР УПРАВЛЕНИЯ AI.
+
+    Эта функция - единственное место в коде, которое общается с AI.
+    Она вызывает AI, обрабатывает ответ (включая очистку markdown),
+    парсит JSON и решает что делать дальше.
+
+    Это гарантирует, что JSON-команды от AI НИКОГДА не попадут пользователю.
+
+    Args:
+        chat_id: ID чата пользователя
+        text: Текст сообщения от пользователя
+        assistant_manager: AssistantManager для общения с AI
+        tenant_config: Конфигурация tenant
+        tenant_slug: Идентификатор tenant
+        session: AsyncSession для работы с БД
+
+    Returns:
+        str: Ответ для отправки пользователю
+    """
+    logger.info(f"🤖 [AI_CENTER] ===== ВЫЗОВ AI ДЛЯ РАСПОЗНАВАНИЯ НАМЕРЕНИЯ =====")
+
+    # ═══════════════════════════════════════════════════════════════════
+    # ШАГ 1: Вызываем AI для получения ответа
+    # ═══════════════════════════════════════════════════════════════════
+    ai_response = await agent_manager.get_ai_response(
+        client=assistant_manager.client,
+        assistant_id=assistant_manager.assistant_id,
+        chat_id=chat_id,
+        text=text
+    )
+
+    logger.info(f"✅ [AI_CENTER] Ответ получен: '{ai_response[:100]}...'")
+
+    # ═══════════════════════════════════════════════════════════════════
+    # ШАГ 2: КРИТИЧНО - Очищаем от markdown-обертки ```json ... ```
+    # ═══════════════════════════════════════════════════════════════════
+    cleaned_response = ai_response
+
+    if '```json' in ai_response:
+        logger.info("📄 [JSON_PARSER] Обнаружена markdown-обертка, очищаю...")
+        try:
+            # Извлекаем чистый JSON из блока кода
+            cleaned_response = ai_response.split('```json')[1].split('```')[0].strip()
+            logger.info(f"✅ [JSON_PARSER] JSON успешно извлечен: '{cleaned_response[:100]}...'")
+        except IndexError:
+            logger.error("❌ [JSON_PARSER] Ошибка при извлечении JSON из markdown")
+            # Если извлечь не удалось, считаем это обычным текстом
+            cleaned_response = ai_response
+
+    # ═══════════════════════════════════════════════════════════════════
+    # ШАГ 3: Пытаемся распарсить JSON
+    # ═══════════════════════════════════════════════════════════════════
+    try:
+        import json
+        command_data = json.loads(cleaned_response)
+
+        if "intent" in command_data:
+            # ✅ AI вернул команду с намерением -> запускаем IVR
+            logger.info(f"📋 [JSON_PARSER] Обнаружен intent: {command_data.get('intent')}")
+            logger.info(f"🚀 [JSON_PARSER] Запускаю IVR-воронку...")
+
+            response = await handle_ai_command(
+                chat_id=chat_id,
+                command_data=command_data,
+                tenant_config=tenant_config,
+                tenant_slug=tenant_slug,
+                session=session
+            )
+
+            logger.info(f"✅ [JSON_PARSER] IVR-воронка вернула ответ")
+            return response
+        else:
+            # JSON без intent -> считаем обычным текстом
+            logger.info(f"📄 [JSON_PARSER] JSON без intent, отправляем как текст")
+            return cleaned_response
+
+    except (json.JSONDecodeError, TypeError) as e:
+        # AI вернул обычный текст (приветствие, ответ на вопрос)
+        logger.info(f"📄 [JSON_PARSER] AI вернул текст (не JSON): {type(e).__name__}")
+        return cleaned_response
+
+
 async def handle_incoming_message(
     tenant_slug: str,
     message_data: Dict[str, Any],
@@ -737,47 +828,36 @@ async def handle_incoming_message(
                 session=session
             )
 
+            # ═══════════════════════════════════════════════════════════════════
+            # ГИБРИДНЫЙ РЕЖИМ: Если IVR вернул None, передаем AI
+            # ═══════════════════════════════════════════════════════════════════
+            if response is None:
+                logger.info(f"🔄 [HYBRID] IVR вернул None → передаю AI для обработки вопроса")
+
+                response = await process_user_input_with_ai(
+                    chat_id=chat_id,
+                    text=text_message,
+                    assistant_manager=assistant_manager,
+                    tenant_config=tenant_config,
+                    tenant_slug=tenant_slug,
+                    session=session
+                )
+
         # ═══════════════════════════════════════════════════════════════════
         # ВЕТКА B: Пользователь в IDLE (первое сообщение или после "Меню")
         # ═══════════════════════════════════════════════════════════════════
         else:
-            logger.info(f"🤖 [AI] Пользователь в IDLE -> вызов AI для распознавания намерения")
+            logger.info(f"🤖 [AI] Пользователь в IDLE -> вызов ЕДИНОГО ЦЕНТРА УПРАВЛЕНИЯ AI")
 
-            # Вызываем AI ТОЛЬКО для распознавания намерения
-            ai_response = await agent_manager.get_ai_response(
-                client=assistant_manager.client,
-                assistant_id=assistant_manager.assistant_id,
+            # ✅ ЕДИНСТВЕННОЕ МЕСТО ВЫЗОВА AI - через централизованную функцию
+            response = await process_user_input_with_ai(
                 chat_id=chat_id,
-                text=text_message
+                text=text_message,
+                assistant_manager=assistant_manager,
+                tenant_config=tenant_config,
+                tenant_slug=tenant_slug,
+                session=session
             )
-
-            logger.info(f"✅ [AI] Ответ получен: '{ai_response[:100]}...'")
-
-            # Пытаемся распарсить JSON
-            try:
-                import json
-                command_data = json.loads(ai_response)
-
-                if "intent" in command_data:
-                    # AI вернул команду с намерением -> запускаем IVR
-                    logger.info(f"📋 [JSON] Обнаружен intent: {command_data.get('intent')}")
-
-                    response = await handle_ai_command(
-                        chat_id=chat_id,
-                        command_data=command_data,
-                        tenant_config=tenant_config,
-                        tenant_slug=tenant_slug,
-                        session=session
-                    )
-                else:
-                    # JSON без intent -> считаем обычным текстом
-                    logger.info(f"📄 [TEXT] JSON без intent, отправляем как текст")
-                    response = ai_response
-
-            except (json.JSONDecodeError, TypeError):
-                # AI вернул обычный текст (приветствие, ответ на вопрос)
-                logger.info(f"📄 [TEXT] AI вернул текст (не JSON)")
-                response = ai_response
 
         # ═══════════════════════════════════════════════════════════════════
         # ШАГ 4: Отправляем ответ пользователю

@@ -885,6 +885,7 @@ async def handle_order_confirmation(chat_id: str, confirmation: str, config: Con
     """
     # Принимаем разные варианты подтверждения
     positive_answers = ["1", "да", "yes", "ок", "ok", "+", "конечно", "давай", "давайте"]
+    negative_answers = ["нет", "no", "не", "отмена", "cancel", "2"]
 
     logger.info(f"🔍 [ORDER_CONFIRMATION] User {chat_id} answered: '{confirmation}'")
 
@@ -897,10 +898,22 @@ async def handle_order_confirmation(chat_id: str, confirmation: str, config: Con
             "✅ Отлично! Чтобы завершить оформление, напишите, пожалуйста, ваше имя.\n\n"
             "Ваш номер телефона мы возьмём автоматически из WhatsApp. 😊"
         )
+    elif confirmation.lower() in negative_answers:
+        # Обработка отрицательного ответа - сброс в главное меню
+        logger.info(f"❌ [ORDER_CONFIRMATION] Пользователь отказался от заказа, возврат в меню")
+
+        # Очищаем состояние
+        clear_state(chat_id)
+        set_state(chat_id, WhatsAppState.IDLE)
+
+        return (
+            "Понял, заказ отменён. \n\n"
+            "Если передумаете или возникнут вопросы, напишите 'Меню' для возврата к выбору товаров. 😊"
+        )
     else:
-        # 🔄 HYBRID MODE: Если ответ не распознан как подтверждение,
+        # 🔄 HYBRID MODE: Если ответ не распознан,
         # возвращаем None - возможно, это вопрос для AI
-        logger.info(f"🔄 [HYBRID] Ответ '{confirmation}' не является подтверждением, возвращаем None для маршрутизации к AI")
+        logger.info(f"🔄 [HYBRID] Ответ '{confirmation}' не распознан, возвращаем None для маршрутизации к AI")
         return None
 
 
@@ -1083,6 +1096,191 @@ async def send_callback_request_to_airtable(config: Config, user_data: dict, cli
         logger.error(f"❌ [CALLBACK_AIRTABLE] Сообщение: {str(e)}")
         logger.error(f"🔍 [CALLBACK_AIRTABLE] === КОНЕЦ СОХРАНЕНИЯ (FAILED) ===")
         return False
+
+
+async def route_by_state(
+    chat_id: str,
+    text: str,
+    state: WhatsAppState,
+    tenant_config,
+    session: AsyncSession
+) -> str:
+    """
+    Главный маршрутизатор IVR-воронки.
+
+    Эта функция маршрутизирует сообщение пользователя к соответствующему
+    обработчику в зависимости от текущего состояния.
+
+    Args:
+        chat_id: ID чата пользователя
+        text: Текст сообщения
+        state: Текущее состояние пользователя
+        tenant_config: Конфигурация tenant
+        session: AsyncSession для работы с БД
+
+    Returns:
+        str: Ответ для отправки пользователю
+    """
+    logger.info(f"🔀 [ROUTE] Маршрутизация: state={state}, text='{text}'")
+
+    # Обработка по состояниям
+    if state == WhatsAppState.MAIN_MENU:
+        return await handle_main_menu_choice(chat_id, text, tenant_config, session)
+
+    elif state == WhatsAppState.EVA_WAITING_BRAND:
+        return await handle_eva_brand_input(chat_id, text, tenant_config, session)
+
+    elif state == WhatsAppState.EVA_WAITING_MODEL:
+        return await handle_eva_model_input(chat_id, text, tenant_config, session)
+
+    elif state == WhatsAppState.EVA_SELECTING_OPTIONS:
+        return await handle_option_selection(chat_id, text, tenant_config, session)
+
+    elif state == WhatsAppState.EVA_CONFIRMING_ORDER:
+        return await handle_order_confirmation(chat_id, text, tenant_config)
+
+    elif state == WhatsAppState.WAITING_FOR_NAME:
+        return await handle_name_input(chat_id, text, tenant_config, session)
+
+    elif state == WhatsAppState.CONTACT_MANAGER:
+        # Сохраняем детали запроса на звонок
+        update_user_data(chat_id, {"callback_details": text})
+        set_state(chat_id, WhatsAppState.WAITING_FOR_NAME)
+        return "Спасибо! Теперь напишите, пожалуйста, ваше имя."
+
+    else:
+        logger.warning(f"⚠️ [ROUTE] Неизвестное состояние: {state}")
+        return "Произошла ошибка. Напишите 'Меню' для возврата в главное меню."
+
+
+async def show_categories(
+    chat_id: str,
+    tenant_config,
+    session: AsyncSession
+) -> str:
+    """
+    Показывает каталог категорий товаров.
+
+    Args:
+        chat_id: ID чата пользователя
+        tenant_config: Конфигурация tenant
+        session: AsyncSession для работы с БД
+
+    Returns:
+        str: Текст с каталогом
+    """
+    logger.info(f"📦 [CATEGORIES] Показ каталога категорий")
+
+    # Устанавливаем состояние
+    set_state(chat_id, WhatsAppState.WAITING_FOR_CATEGORY_CHOICE)
+
+    # Генерируем меню из локализации
+    return await handle_start_message(chat_id, tenant_config)
+
+
+async def handle_category_selection(
+    chat_id: str,
+    category_code: str,
+    tenant_config,
+    session: AsyncSession
+) -> str:
+    """
+    Обрабатывает выбор категории и показывает марки.
+
+    Args:
+        chat_id: ID чата пользователя
+        category_code: Код категории (eva_mats, seat_covers, и т.д.)
+        tenant_config: Конфигурация tenant
+        session: AsyncSession для работы с БД
+
+    Returns:
+        str: Текст со списком марок
+    """
+    logger.info(f"📦 [CATEGORY_SEL] Выбрана категория: {category_code}")
+
+    # Получаем название категории из локализации
+    i18n = tenant_config.i18n
+    catalog_categories = i18n.get("buttons.catalog_categories")
+
+    category_name = "Товары"
+    for cat in catalog_categories:
+        if cat.get("callback_data") == f"category:{category_code}":
+            category_name = cat.get("text", "Товары")
+            break
+
+    # Сохраняем категорию
+    update_user_data(chat_id, {"category": category_code, "category_name": category_name})
+
+    # Переходим к выбору марки
+    set_state(chat_id, WhatsAppState.EVA_WAITING_BRAND)
+
+    # Показываем марки
+    return await show_brands_page(chat_id, 1, tenant_config, session, category_name)
+
+
+async def handle_brand_selection(
+    chat_id: str,
+    brand_name: str,
+    tenant_config,
+    session: AsyncSession
+) -> str:
+    """
+    Обрабатывает выбор марки и показывает модели.
+
+    Args:
+        chat_id: ID чата пользователя
+        brand_name: Название марки
+        tenant_config: Конфигурация tenant
+        session: AsyncSession для работы с БД
+
+    Returns:
+        str: Текст со списком моделей или предложение замера
+    """
+    logger.info(f"🚗 [BRAND_SEL] Выбрана марка: {brand_name}")
+
+    # Сохраняем марку
+    update_user_data(chat_id, {"brand_name": brand_name})
+
+    # Переходим к выбору модели
+    set_state(chat_id, WhatsAppState.EVA_WAITING_MODEL)
+
+    # Показываем модели
+    return await show_models_page(chat_id, 1, brand_name, tenant_config, session)
+
+
+async def handle_options_selection(
+    chat_id: str,
+    tenant_config,
+    session: AsyncSession
+) -> str:
+    """
+    Показывает опции для выбора (с/без бортов).
+
+    Args:
+        chat_id: ID чата пользователя
+        tenant_config: Конфигурация tenant
+        session: AsyncSession для работы с БД
+
+    Returns:
+        str: Текст с опциями
+    """
+    logger.info(f"⚙️ [OPTIONS] Показ опций")
+
+    user_data = get_user_data(chat_id)
+    brand_name = user_data.get("brand_name", "")
+    model_name = user_data.get("model_name", "")
+
+    # Переключаем состояние
+    set_state(chat_id, WhatsAppState.EVA_SELECTING_OPTIONS)
+
+    return (
+        f"✅ <b>Отличные новости!</b>\n\n"
+        f"У нас есть лекала для <b>{brand_name} {model_name}</b>!\n\n"
+        f"📝 Шаг 3/3: Выберите дополнительные опции:\n\n"
+        f"1️⃣ - ✅ С бортами (рекомендуем)\n"
+        f"2️⃣ - ❌ Без бортов\n"
+        f"3️⃣ - ❓ Не знаю, нужна консультация"
+    )
 
 
 async def handle_name_input(chat_id: str, name: str, config: Config, session) -> str:
