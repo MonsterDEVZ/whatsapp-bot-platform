@@ -49,8 +49,18 @@ from packages.core.ai.assistant import AssistantManager
 from packages.core.ai.response_parser import clean_text_for_whatsapp
 
 # Импортируем наши обработчики
-from .state_manager import clear_thread_id  # Оставляем только управление thread
-from . import agent_manager  # НОВЫЙ АГЕНТНЫЙ МЕНЕДЖЕР
+from .state_manager import (
+    get_state,
+    set_state,
+    WhatsAppState,
+    clear_thread_id,
+    get_user_data,
+    update_user_data,
+    clear_state
+)
+from . import agent_manager  # Упрощенный AI для распознавания намерений
+from . import whatsapp_handlers  # IVR-воронка
+from .tenant_handlers import evopoliki_handler, five_deluxe_handler  # Tenant-specific обработчики
 
 # Глобальный словарь AssistantManager для каждого tenant
 # Формат: {tenant_slug: AssistantManager}
@@ -469,6 +479,144 @@ async def webhook_handler(
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 
+# ============================================================================
+# HELPER FUNCTIONS - IVR Routing and AI Command Handling
+# ============================================================================
+
+async def route_message_by_state(
+    chat_id: str,
+    text: str,
+    current_state: WhatsAppState,
+    tenant_config,
+    tenant_slug: str,
+    session: AsyncSession
+) -> str:
+    """
+    Маршрутизирует сообщение пользователя к соответствующему обработчику IVR-воронки.
+
+    Эта функция вызывается ТОЛЬКО когда пользователь находится в воронке (state != IDLE).
+    AI НЕ вызывается - вся логика выполняется кодом.
+
+    Args:
+        chat_id: ID чата пользователя
+        text: Текст сообщения
+        current_state: Текущее состояние пользователя
+        tenant_config: Конфигурация tenant
+        tenant_slug: Идентификатор tenant
+        session: AsyncSession для работы с БД
+
+    Returns:
+        str: Ответ для отправки пользователю
+    """
+    logger.info(f"🔀 [IVR] Маршрутизация по состоянию: {current_state}")
+
+    # Вызываем обработчик IVR-воронки из whatsapp_handlers
+    # Это та же логика, которая работала "по цифрам"
+    try:
+        response = await whatsapp_handlers.route_by_state(
+            chat_id=chat_id,
+            text=text,
+            state=current_state,
+            tenant_config=tenant_config,
+            session=session
+        )
+        return response
+    except Exception as e:
+        logger.error(f"❌ [IVR] Ошибка в IVR-воронке: {e}", exc_info=True)
+        return "Произошла ошибка. Напишите 'Меню' для начала заново."
+
+
+async def handle_ai_command(
+    chat_id: str,
+    command_data: Dict[str, Any],
+    tenant_config,
+    tenant_slug: str,
+    session: AsyncSession
+) -> str:
+    """
+    Обрабатывает команду от AI и запускает IVR-воронку.
+
+    Эта функция вызывается когда AI распознал намерение пользователя
+    и вернул JSON с intent. Она извлекает данные из JSON, сохраняет их
+    в сессию пользователя и передает управление в IVR-воронку.
+
+    Args:
+        chat_id: ID чата пользователя
+        command_data: JSON с данными от AI (intent, category, brand, model и т.д.)
+        tenant_config: Конфигурация tenant
+        tenant_slug: Идентификатор tenant
+        session: AsyncSession для работы с БД
+
+    Returns:
+        str: Ответ для отправки пользователю
+    """
+    logger.info(f"📋 [AI_COMMAND] Обработка команды от AI: {command_data}")
+
+    intent = command_data.get("intent", "").upper()
+
+    # Обработка intent: ORDER (заказ)
+    if intent == "ORDER":
+        logger.info(f"🛒 [AI_COMMAND] Intent: ORDER -> запуск IVR-воронки")
+
+        # Извлекаем данные, которые распознал AI
+        category = command_data.get("category")
+        brand = command_data.get("brand")
+        model = command_data.get("model")
+
+        logger.info(f"📦 [AI_COMMAND] Распознано - category: {category}, brand: {brand}, model: {model}")
+
+        # Сохраняем данные в сессию пользователя
+        if category:
+            update_user_data(chat_id, "category", category)
+        if brand:
+            update_user_data(chat_id, "brand", brand)
+        if model:
+            update_user_data(chat_id, "model", model)
+
+        # Определяем с какого шага начать IVR-воронку
+        if category and brand and model:
+            # AI распознал всё -> сразу к опциям
+            set_state(chat_id, WhatsAppState.WAITING_FOR_OPTIONS_CHOICE)
+            response = await whatsapp_handlers.handle_options_selection(
+                chat_id=chat_id,
+                tenant_config=tenant_config,
+                session=session
+            )
+        elif category and brand:
+            # AI распознал категорию и марку -> спрашиваем модель
+            set_state(chat_id, WhatsAppState.WAITING_FOR_MODEL_CHOICE)
+            response = await whatsapp_handlers.handle_brand_selection(
+                chat_id=chat_id,
+                brand_name=brand,
+                tenant_config=tenant_config,
+                session=session
+            )
+        elif category:
+            # AI распознал только категорию -> спрашиваем марку
+            set_state(chat_id, WhatsAppState.WAITING_FOR_BRAND_CHOICE)
+            response = await whatsapp_handlers.handle_category_selection(
+                chat_id=chat_id,
+                category_code=category,
+                tenant_config=tenant_config,
+                session=session
+            )
+        else:
+            # AI не распознал категорию -> показываем каталог
+            set_state(chat_id, WhatsAppState.WAITING_FOR_CATEGORY_CHOICE)
+            response = await whatsapp_handlers.show_categories(
+                chat_id=chat_id,
+                tenant_config=tenant_config,
+                session=session
+            )
+
+        return response
+
+    # Обработка других intents (если будут добавлены в будущем)
+    else:
+        logger.warning(f"⚠️ [AI_COMMAND] Неизвестный intent: {intent}")
+        return f"Я понял ваш запрос, но пока не могу его обработать. Напишите 'Меню' для выбора услуги."
+
+
 async def handle_incoming_message(
     tenant_slug: str,
     message_data: Dict[str, Any],
@@ -476,12 +624,13 @@ async def handle_incoming_message(
     session: AsyncSession
 ):
     """
-    Обрабатывает входящее сообщение от пользователя WhatsApp через AI Agent.
+    Обрабатывает входящее сообщение от пользователя WhatsApp.
 
-    НОВАЯ АРХИТЕКТУРА (Agent-First):
-    - Все сообщения обрабатываются через AI Agent
-    - AI Agent сам вызывает нужные инструменты
-    - Нет машины состояний - весь диалог контролирует AI
+    НОВАЯ АРХИТЕКТУРА (AI как роутер + IVR-воронка):
+    - AI используется ТОЛЬКО ОДИН РАЗ для распознавания намерения (state == IDLE)
+    - Если пользователь в воронке (state != IDLE), AI НЕ вызывается
+    - Вся пошаговая логика выполняется IVR-воронкой БЕЗ обращений к AI
+    - Это обеспечивает скорость, надежность и отсутствие Rate Limits
 
     Args:
         tenant_slug: Идентификатор tenant (evopoliki, five_deluxe)
@@ -516,13 +665,19 @@ async def handle_incoming_message(
         tenant_id = 1 if tenant_slug == "evopoliki" else 2
 
         # ═══════════════════════════════════════════════════════════════════
-        # ШАГ 2: Обработка команды "Меню" - сброс Thread
+        # ШАГ 2: Обработка команды "Меню" - сброс State и Thread
         # ═══════════════════════════════════════════════════════════════════
         if text_message.lower() in ["меню", "menu", "/start", "start"]:
-            logger.info(f"🔄 [MENU] Команда 'Меню' - сброс Thread для {chat_id}")
+            logger.info(f"🔄 [MENU] Команда 'Меню' - полный сброс для {chat_id}")
+
+            # Сбрасываем state
+            clear_state(chat_id)
+            set_state(chat_id, WhatsAppState.IDLE)
+
+            # Сбрасываем thread
             clear_thread_id(chat_id)
 
-            # Очищаем историю в memory (если используется)
+            # Очищаем историю в memory
             try:
                 memory = get_memory()
                 memory.clear_history(chat_id)
@@ -531,28 +686,76 @@ async def handle_incoming_message(
                 logger.warning(f"⚠️ [MEMORY] Ошибка очистки истории: {e}")
 
         # ═══════════════════════════════════════════════════════════════════
-        # ШАГ 3: Вызываем AI Agent для обработки сообщения
+        # ШАГ 3: КРИТИЧЕСКАЯ ПРОВЕРКА - Где находится пользователь?
         # ═══════════════════════════════════════════════════════════════════
-        logger.info(f"🤖 [AGENT] Передаю сообщение в AI Agent...")
+        current_state = get_state(chat_id)
+        logger.info(f"🔍 [STATE_CHECK] User state: {current_state}")
 
-        response = await agent_manager.process_message_with_agent(
-            client=assistant_manager.client,
-            assistant_id=assistant_manager.assistant_id,
-            chat_id=chat_id,
-            text=text_message,
-            tenant_id=tenant_id,
-            session=session
-        )
+        # ═══════════════════════════════════════════════════════════════════
+        # ВЕТКА A: Пользователь в воронке (state != IDLE)
+        # ═══════════════════════════════════════════════════════════════════
+        if current_state != WhatsAppState.IDLE:
+            logger.info(f"🔀 [ROUTE] Пользователь в воронке -> IVR (БЕЗ AI)")
 
-        logger.info(f"✅ [AGENT] Получен ответ от AI: '{response[:100]}...'")
+            # Передаем управление в IVR-воронку
+            response = await route_message_by_state(
+                chat_id=chat_id,
+                text=text_message,
+                current_state=current_state,
+                tenant_config=tenant_config,
+                tenant_slug=tenant_slug,
+                session=session
+            )
+
+        # ═══════════════════════════════════════════════════════════════════
+        # ВЕТКА B: Пользователь в IDLE (первое сообщение или после "Меню")
+        # ═══════════════════════════════════════════════════════════════════
+        else:
+            logger.info(f"🤖 [AI] Пользователь в IDLE -> вызов AI для распознавания намерения")
+
+            # Вызываем AI ТОЛЬКО для распознавания намерения
+            ai_response = await agent_manager.get_ai_response(
+                client=assistant_manager.client,
+                assistant_id=assistant_manager.assistant_id,
+                chat_id=chat_id,
+                text=text_message
+            )
+
+            logger.info(f"✅ [AI] Ответ получен: '{ai_response[:100]}...'")
+
+            # Пытаемся распарсить JSON
+            try:
+                import json
+                command_data = json.loads(ai_response)
+
+                if "intent" in command_data:
+                    # AI вернул команду с намерением -> запускаем IVR
+                    logger.info(f"📋 [JSON] Обнаружен intent: {command_data.get('intent')}")
+
+                    response = await handle_ai_command(
+                        chat_id=chat_id,
+                        command_data=command_data,
+                        tenant_config=tenant_config,
+                        tenant_slug=tenant_slug,
+                        session=session
+                    )
+                else:
+                    # JSON без intent -> считаем обычным текстом
+                    logger.info(f"📄 [TEXT] JSON без intent, отправляем как текст")
+                    response = ai_response
+
+            except (json.JSONDecodeError, TypeError):
+                # AI вернул обычный текст (приветствие, ответ на вопрос)
+                logger.info(f"📄 [TEXT] AI вернул текст (не JSON)")
+                response = ai_response
 
         # ═══════════════════════════════════════════════════════════════════
         # ШАГ 4: Отправляем ответ пользователю
         # ═══════════════════════════════════════════════════════════════════
-        if response:  # Проверяем что ответ не пустой
+        if response:
             client = GreenAPIClient(tenant_config)
             await client.send_message(chat_id, response)
-            logger.info(f"✅ [INCOMING] Ответ отправлен {sender_name} ({chat_id})")
+            logger.info(f"✅ [SEND] Ответ отправлен {sender_name} ({chat_id})")
 
     except Exception as e:
         logger.error(f"❌ [INCOMING] КРИТИЧЕСКАЯ ОШИБКА: {e}", exc_info=True)
