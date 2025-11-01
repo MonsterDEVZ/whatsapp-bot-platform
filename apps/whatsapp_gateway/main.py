@@ -45,9 +45,10 @@ for tenant_dir in ["telegram/evopoliki", "telegram/five_deluxe"]:
 from packages.core.config import Config
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession as SQLAsyncSession
 from sqlalchemy import text
-from packages.core.memory import init_memory, get_memory
-from packages.core.ai.assistant import AssistantManager
 from packages.core.ai.response_parser import clean_text_for_whatsapp
+
+# Импортируем наш новый AssistantManager с поддержкой Tool Calls
+from .agent_manager import AssistantManager, process_message_with_agent
 
 # Импортируем наши обработчики
 from .state_manager import (
@@ -129,10 +130,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"❌ Ошибка подключения к БД: {e}")
         raise
-
-    # Инициализируем DialogMemory (общая для всех tenant)
-    dialog_memory = init_memory(max_messages=6)
-    logger.info("✅ DialogMemory initialized")
 
     # Загружаем конфигурации tenant и создаем их AssistantManager
     load_tenant_configs()
@@ -246,14 +243,12 @@ def load_tenant_configs():
                 if not tenant_config.phone_number:
                     logger.warning(f"⚠️  {tenant_slug}: WHATSAPP_PHONE_NUMBER not set (optional)")
                 
-                # Создаем AssistantManager для этого tenant
+                # Создаем AssistantManager для этого tenant (новый с поддержкой Tool Calls)
                 if tenant_config.openai_api_key and tenant_config.openai_assistant_id:
                     try:
-                        memory = get_memory()
                         assistant_manager = AssistantManager(
                             api_key=tenant_config.openai_api_key,
-                            assistant_id=tenant_config.openai_assistant_id,
-                            memory=memory
+                            assistant_id=tenant_config.openai_assistant_id
                         )
                         tenant_assistant_managers[tenant_slug] = assistant_manager
                         logger.info(f"✅ AssistantManager initialized for {tenant_slug} (Assistant ID: {tenant_config.openai_assistant_id})")
@@ -493,101 +488,9 @@ async def webhook_handler(
 # ПРИВАТНАЯ ФУНКЦИЯ ДЛЯ РАБОТЫ С AI
 # ============================================================================
 
-async def _get_ai_response(
-    chat_id: str,
-    text: str,
-    assistant_manager: AssistantManager
-) -> str:
-    """
-    ПРИВАТНАЯ функция для получения ответа от OpenAI Assistant.
-
-    Используется ТОЛЬКО для распознавания намерения пользователя.
-    Возвращает либо JSON с командой, либо текстовый ответ.
-
-    Args:
-        chat_id: ID чата пользователя
-        text: Текст сообщения от пользователя
-        assistant_manager: AssistantManager с клиентом и assistant_id
-
-    Returns:
-        str: Ответ от AI (JSON или текст)
-    """
-    from .state_manager import get_thread_id, set_thread_id
-
-    logger.info(f"🤖 [AI] Запрос к AI для распознавания намерения")
-    logger.info(f"🤖 [AI] Message: '{text}'")
-
-    client = assistant_manager.client
-    assistant_id = assistant_manager.assistant_id
-
-    # Получаем или создаем Thread
-    thread_id = await get_thread_id(chat_id)
-
-    if not thread_id:
-        logger.info(f"🧵 [AI] Создаю новый Thread...")
-        thread = client.beta.threads.create()
-        thread_id = thread.id
-        await set_thread_id(chat_id, thread_id)
-        logger.info(f"🧵 [AI] ✅ Thread создан: {thread_id}")
-    else:
-        logger.info(f"🧵 [AI] Используем Thread: {thread_id}")
-
-    # Добавляем сообщение
-    client.beta.threads.messages.create(
-        thread_id=thread_id,
-        role="user",
-        content=text
-    )
-
-    # Запускаем Assistant
-    run = client.beta.threads.runs.create(
-        thread_id=thread_id,
-        assistant_id=assistant_id
-    )
-    logger.info(f"🏃 [AI] Run создан: {run.id}")
-
-    # Ждем завершения
-    max_wait_time = 30
-    elapsed_time = 0
-
-    while run.status in ["queued", "in_progress"]:
-        if elapsed_time >= max_wait_time:
-            logger.error(f"❌ [AI] Превышено время ожидания")
-            return "Извините, обработка заняла слишком много времени. Попробуйте еще раз."
-
-        await async_lib.sleep(1)
-        elapsed_time += 1
-
-        run = client.beta.threads.runs.retrieve(
-            thread_id=thread_id,
-            run_id=run.id
-        )
-
-    logger.info(f"🏁 [AI] Run завершен: {run.status}")
-
-    # Обрабатываем результат
-    if run.status == "completed":
-        messages = client.beta.threads.messages.list(
-            thread_id=thread_id,
-            limit=1,
-            order="desc"
-        )
-
-        if messages.data and len(messages.data) > 0:
-            response = messages.data[0].content[0].text.value
-            logger.info(f"✅ [AI] Ответ получен: '{response[:100]}...'")
-            return response
-        else:
-            return "Извините, не удалось получить ответ."
-
-    elif run.status == "failed":
-        error_msg = run.last_error.message if run.last_error else "Unknown"
-        logger.error(f"❌ [AI] Run failed: {error_msg}")
-        return "Извините, произошла техническая ошибка."
-
-    else:
-        logger.error(f"❌ [AI] Неожиданный статус: {run.status}")
-        return "Произошла ошибка. Попробуйте позже."
+# ФУНКЦИЯ _get_ai_response УДАЛЕНА
+# Теперь используется process_message_with_agent из agent_manager.py
+# который поддерживает Tool Calls и "умное ожидание"
 
 
 # ============================================================================
@@ -780,14 +683,6 @@ async def handle_incoming_message(
             # Сбрасываем thread
             clear_thread_id(chat_id)
 
-            # Очищаем историю в memory
-            try:
-                memory = get_memory()
-                memory.clear_history(chat_id)
-                logger.info(f"🗑️ [MEMORY] История очищена для {chat_id}")
-            except Exception as e:
-                logger.warning(f"⚠️ [MEMORY] Ошибка очистки истории: {e}")
-
         # ═══════════════════════════════════════════════════════════════════
         # ШАГ 3: КРИТИЧЕСКАЯ ПРОВЕРКА - Где находится пользователь?
         # ═══════════════════════════════════════════════════════════════════
@@ -809,8 +704,15 @@ async def handle_incoming_message(
 
         # 2. Если IVR не смог обработать ИЛИ пользователь в IDLE, обращаемся к AI
         if response_text is None:
-            logger.info("🤖 [ROUTER] Передаю в AI для распознавания...")
-            ai_response = await _get_ai_response(chat_id, text_message, assistant_manager)
+            logger.info("🤖 [AI Agent] Передаю в AI Agent с поддержкой Tool Calls...")
+            ai_response = await process_message_with_agent(
+                chat_id=chat_id,
+                user_message=text_message,
+                assistant_manager=assistant_manager,
+                tenant_id=tenant_id,
+                session=session,
+                max_wait_time=60  # 60 секунд таймаут
+            )
 
             # 3. Пытаемся распознать КОМАНДУ в ответе AI
             try:
